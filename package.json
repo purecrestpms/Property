@@ -1,0 +1,33 @@
+{
+  "name": "purecrest",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch server.ts",
+    "start": "tsx server.ts",
+    "dev:cloudflare": "wrangler pages dev dist --d1=purecrest-production --local --ip 0.0.0.0 --port 3000",
+    "build": "vite build",
+    "lint": "tsc --noEmit",
+    "preview": "wrangler pages dev dist",
+    "deploy": "npm run build && wrangler pages deploy dist",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "db:migrate:local": "wrangler d1 migrations apply purecrest-production --local",
+    "db:migrate:remote": "wrangler d1 migrations apply purecrest-production --remote",
+    "db:seed": "wrangler d1 execute purecrest-production --local --file=./seed.sql",
+    "db:seed:remote": "wrangler d1 execute purecrest-production --remote --file=./seed.sql",
+    "db:reset": "rm -rf .data .wrangler/state/v3/d1 && npm run db:migrate:local && npm run db:seed"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.11",
+    "@types/node": "^26.6.6",
+    "hono": "^4.12.26",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260621.1",
+    "@hono/vite-build": "^1.2.0",
+    "@hono/vite-dev-server": "^0.25.2",
+    "vite": "^6.3.5",
+    "wrangler": "^4.4.0"
+  }
+}
