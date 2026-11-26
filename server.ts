@@ -9,6 +9,8 @@ const server = new Hono()
 
 // Serve static assets from public/ (mirrors Cloudflare Pages static serving)
 server.use('/static/*', serveStatic({ root: './public' }))
+server.use('/assets/*', serveStatic({ root: './public' }))
+server.use('/src/assets/images/*', serveStatic({ root: '.' }))
 server.use('/purecrest-logo.png', serveStatic({ path: './public/purecrest-logo.png' }))
 server.use('/purecrest-logo-transparent.png', serveStatic({ path: './public/purecrest-logo-transparent.png' }))
 

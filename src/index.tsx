@@ -68,9 +68,27 @@ app.get('/', async (c) => {
 
   try {
     const featuredResult = await db.prepare(
-      `SELECT * FROM properties WHERE is_featured = 1 AND status = 'active' ORDER BY created_at DESC LIMIT 6`
+      `SELECT * FROM properties WHERE is_featured = 1 AND status = 'active' ORDER BY created_at DESC LIMIT 8`
     ).all()
     featuredProperties = (featuredResult.results || []) as any[]
+
+    // Enrich featured shortlets with room counts and starting room rate
+    for (const prop of featuredProperties) {
+      if (prop.category === 'short-let') {
+        try {
+          const rms = await db.prepare(
+            `SELECT id, room_name, room_type, price_per_night, images FROM property_rooms WHERE property_id = ? AND is_available = 1 ORDER BY sort_order ASC, price_per_night ASC`
+          ).bind(prop.id).all()
+          const roomRows = (rms.results || []) as any[]
+          prop.rooms_count = roomRows.length
+          prop.rooms_preview = roomRows.slice(0, 4)
+          if (roomRows.length > 0) {
+            const prices = roomRows.map((r: any) => Number(r.price_per_night || 0)).filter((n: number) => n > 0)
+            if (prices.length > 0) prop.min_room_price = Math.min(...prices)
+          }
+        } catch (_) {}
+      }
+    }
 
     const recentResult = await db.prepare(
       `SELECT * FROM properties WHERE status = 'active' ORDER BY created_at DESC LIMIT 8`
@@ -658,8 +676,31 @@ app.get('/api/media/:id', async (c) => {
   const db = c.env.DB
   const id = c.req.param('id')
   try {
-    const row = await db.prepare(`SELECT mime_type, file_url FROM media_uploads WHERE id = ?`).bind(id).first() as any
-    if (!row || !row.file_url) return c.text('Media not found', 404)
+    let row: any = null
+    try {
+      row = await db.prepare(`SELECT mime_type, file_url, image_blob FROM media_uploads WHERE id = ?`).bind(id).first()
+    } catch {
+      row = await db.prepare(`SELECT mime_type, file_url FROM media_uploads WHERE id = ?`).bind(id).first()
+    }
+    if (!row) return c.text('Media not found', 404)
+
+    // Serve directly from binary BLOB column in SQLite when available
+    if (row.image_blob && (row.image_blob instanceof Uint8Array || ArrayBuffer.isView(row.image_blob) || row.image_blob instanceof ArrayBuffer)) {
+      const bytes = row.image_blob instanceof Uint8Array
+        ? row.image_blob
+        : new Uint8Array(row.image_blob instanceof ArrayBuffer ? row.image_blob : row.image_blob.buffer)
+      if (bytes.byteLength > 0) {
+        return new Response(bytes as unknown as BodyInit, {
+          status: 200,
+          headers: {
+            'Content-Type': row.mime_type || 'application/octet-stream',
+            'Cache-Control': 'public, max-age=31536000, immutable',
+          },
+        })
+      }
+    }
+
+    if (!row.file_url) return c.text('Media not found', 404)
     const fileUrl = String(row.file_url)
     if (fileUrl.startsWith('http://') || fileUrl.startsWith('https://') || fileUrl.startsWith('/')) {
       return c.redirect(fileUrl, 302)
@@ -686,8 +727,8 @@ app.get('/api/media/:id', async (c) => {
 })
 
 // ============================================================
-// IMAGE UPLOAD — max 10 MB, stored in media_uploads, returns lightweight /api/media/:id URL
-// Supports optional property_id and replace_index for instant DB sync
+// IMAGE UPLOAD — max 10 MB, stored as BLOB + data URL in media_uploads
+// Supports property_id, room_id, and replace_index for instant DB sync
 // ============================================================
 app.post('/api/upload-image', async (c) => {
   if (!hasAdminCookie(c)) return c.json({ success: false, error: 'Unauthorized — please log in to Admin' }, 401)
@@ -696,7 +737,10 @@ app.post('/api/upload-image', async (c) => {
     let body: any
     try { body = await c.req.parseBody() } catch(pe) { return c.json({ success: false, error: 'Could not parse request body' }) }
     const file = body['image'] as File | null
-    const propertyId = (body['property_id'] as string || '').trim()
+    const propertyIdRaw = (body['property_id'] as string || '').trim()
+    const roomIdRaw = (body['room_id'] as string || '').trim()
+    const propertyIdNum = propertyIdRaw && !isNaN(parseInt(propertyIdRaw)) ? parseInt(propertyIdRaw) : null
+    const roomIdNum = roomIdRaw && !isNaN(parseInt(roomIdRaw)) ? parseInt(roomIdRaw) : null
     const replaceIndexRaw = (body['replace_index'] as string || '').trim()
     const replaceIndex = replaceIndexRaw !== '' && !isNaN(parseInt(replaceIndexRaw)) ? parseInt(replaceIndexRaw) : -1
     if (!file || typeof file === 'string' || !file.size) {
@@ -720,17 +764,48 @@ app.post('/api/upload-image', async (c) => {
     let mediaId: number | null = null
     try {
       const mr = await db.prepare(
-        `INSERT INTO media_uploads (uploader_type, file_name, file_type, mime_type, file_url, file_size) VALUES ('admin',?,?,?,?,?)`
-      ).bind(file.name || 'image-upload', 'image', file.type, dataUrl, file.size).run()
+        `INSERT INTO media_uploads (uploader_type, property_id, room_id, file_name, file_type, mime_type, file_url, image_blob, file_size) VALUES ('admin',?,?,?,?,?,?,?,?)`
+      ).bind(propertyIdNum, roomIdNum, file.name || 'image-upload', 'image', file.type, dataUrl, bytes, file.size).run()
       mediaId = (mr.meta.last_row_id ?? null) as number | null
-    } catch (me: any) {
-      console.error('media_uploads insert error:', me?.message || me)
+    } catch {
+      try {
+        const mr = await db.prepare(
+          `INSERT INTO media_uploads (uploader_type, property_id, file_name, file_type, mime_type, file_url, file_size) VALUES ('admin',?,?,?,?,?,?)`
+        ).bind(propertyIdNum, file.name || 'image-upload', 'image', file.type, dataUrl, file.size).run()
+        mediaId = (mr.meta.last_row_id ?? null) as number | null
+      } catch (me: any) {
+        console.error('media_uploads insert error:', me?.message || me)
+      }
     }
     const mediaUrl = mediaId ? `/api/media/${mediaId}` : dataUrl
     let updatedImages: string[] | undefined = undefined
-    if (propertyId && !isNaN(parseInt(propertyId))) {
+
+    if (roomIdNum) {
       try {
-        const prop = await db.prepare(`SELECT images FROM properties WHERE id = ?`).bind(propertyId).first() as any
+        const room = await db.prepare(`SELECT property_id, images FROM property_rooms WHERE id = ?`).bind(roomIdNum).first() as any
+        if (room) {
+          let imgs: string[] = []
+          try { imgs = JSON.parse(room.images || '[]') } catch { imgs = [] }
+          if (replaceIndex >= 0 && replaceIndex < imgs.length) {
+            imgs[replaceIndex] = mediaUrl
+          } else {
+            imgs.push(mediaUrl)
+          }
+          updatedImages = imgs
+          await db.prepare(`UPDATE property_rooms SET images = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+            .bind(JSON.stringify(imgs), roomIdNum).run()
+          try {
+            await db.prepare(
+              `INSERT INTO property_room_images (property_id, room_id, media_id, image_url, is_cover, sort_order) VALUES (?,?,?,?,?,?)`
+            ).bind(room.property_id || propertyIdNum || 0, roomIdNum, mediaId, mediaUrl, imgs.length === 1 ? 1 : 0, imgs.length - 1).run()
+          } catch (_) {}
+        }
+      } catch (re: any) {
+        console.error('Room image instant-sync error:', re?.message || re)
+      }
+    } else if (propertyIdNum) {
+      try {
+        const prop = await db.prepare(`SELECT images FROM properties WHERE id = ?`).bind(propertyIdNum).first() as any
         if (prop) {
           let imgs: string[] = []
           try { imgs = JSON.parse(prop.images || '[]') } catch { imgs = [] }
@@ -741,7 +816,7 @@ app.post('/api/upload-image', async (c) => {
           }
           updatedImages = imgs
           await db.prepare(`UPDATE properties SET images = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-            .bind(JSON.stringify(imgs), propertyId).run()
+            .bind(JSON.stringify(imgs), propertyIdNum).run()
         }
       } catch (pe: any) {
         console.error('Property image instant-sync error:', pe?.message || pe)
@@ -771,8 +846,38 @@ app.post('/api/properties/:id/images/sync', async (c) => {
   }
 })
 
+// API: Instantly sync ordered images for a room (also mirrors to property_room_images)
+app.post('/api/rooms/:id/images/sync', async (c) => {
+  if (!hasAdminCookie(c)) return c.json({ success: false, error: 'Unauthorized' }, 401)
+  const db = c.env.DB
+  const roomId = parseInt(c.req.param('id'))
+  if (isNaN(roomId)) return c.json({ success: false, error: 'Invalid room ID' }, 400)
+  try {
+    const body = await c.req.json()
+    const raw = Array.isArray(body.images) ? body.images : []
+    const images = raw.map((u: any) => String(u || '').trim()).filter(Boolean)
+    const room = await db.prepare(`SELECT property_id FROM property_rooms WHERE id = ?`).bind(roomId).first() as any
+    await db.prepare(`UPDATE property_rooms SET images = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(JSON.stringify(images), roomId).run()
+    try {
+      await db.prepare(`DELETE FROM property_room_images WHERE room_id = ?`).bind(roomId).run()
+      for (let i = 0; i < images.length; i++) {
+        const url = images[i]
+        const mMatch = url.match(/^\/api\/media\/(\d+)$/)
+        const mediaId = mMatch ? parseInt(mMatch[1]) : null
+        await db.prepare(
+          `INSERT INTO property_room_images (property_id, room_id, media_id, image_url, is_cover, sort_order) VALUES (?,?,?,?,?,?)`
+        ).bind(room?.property_id || 0, roomId, mediaId, url, i === 0 ? 1 : 0, i).run()
+      }
+    } catch (_) {}
+    return c.json({ success: true, images })
+  } catch (e: any) {
+    return c.json({ success: false, error: e?.message || 'Failed to sync room images' })
+  }
+})
+
 // ============================================================
-// SHORTLET ROOMS / UNITS CRUD APIs
+// SHORTLET ROOMS / UNITS CRUD & AVAILABILITY APIs
 // ============================================================
 app.get('/api/properties/:id/rooms', async (c) => {
   const db = c.env.DB
@@ -782,6 +887,38 @@ app.get('/api/properties/:id/rooms', async (c) => {
     return c.json({ success: true, rooms: res.results || [] })
   } catch (e: any) {
     return c.json({ success: false, rooms: [], error: e?.message || 'Failed to load rooms' })
+  }
+})
+
+app.get('/api/properties/:id/availability', async (c) => {
+  const db = c.env.DB
+  const propertyId = parseInt(c.req.param('id'))
+  const roomIdRaw = c.req.query('room_id') || ''
+  const checkin = c.req.query('checkin') || ''
+  const checkout = c.req.query('checkout') || ''
+  if (isNaN(propertyId)) return c.json({ success: false, available: true, conflicts: [] })
+  try {
+    const roomId = roomIdRaw && !isNaN(parseInt(roomIdRaw)) ? parseInt(roomIdRaw) : null
+    let query = `SELECT id, room_id, room_name, checkin_date, checkout_date, status FROM bookings WHERE property_id = ? AND status IN ('pending','confirmed')`
+    const params: any[] = [propertyId]
+    if (roomId) {
+      query += ` AND (room_id = ? OR room_id IS NULL)`
+      params.push(roomId)
+    }
+    const booked = (await db.prepare(query).bind(...params).all()).results || []
+    let available = true
+    let conflicts: any[] = []
+    if (checkin && checkout) {
+      for (const b of booked as any[]) {
+        if (b.checkin_date < checkout && b.checkout_date > checkin) {
+          available = false
+          conflicts.push({ checkin: b.checkin_date, checkout: b.checkout_date, status: b.status, room_name: b.room_name })
+        }
+      }
+    }
+    return c.json({ success: true, available, conflicts, booked_ranges: booked })
+  } catch (e: any) {
+    return c.json({ success: false, available: true, conflicts: [] })
   }
 })
 
@@ -807,7 +944,21 @@ app.post('/api/properties/:id/rooms', async (c) => {
     const result = await db.prepare(
       `INSERT INTO property_rooms (property_id, room_name, room_type, description, price_per_night, max_guests, bedrooms, bathrooms, amenities, images, is_available, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
     ).bind(propertyId, roomName, roomType, description, pricePerNight, maxGuests, bedrooms, bathrooms, JSON.stringify(amenities), JSON.stringify(images), isAvailable, sortOrder).run()
-    const created = await db.prepare(`SELECT * FROM property_rooms WHERE id = ?`).bind(result.meta.last_row_id).first()
+    const roomId = result.meta.last_row_id
+    try {
+      for (let i = 0; i < images.length; i++) {
+        const url = images[i]
+        const mMatch = url.match(/^\/api\/media\/(\d+)$/)
+        const mediaId = mMatch ? parseInt(mMatch[1]) : null
+        await db.prepare(
+          `INSERT INTO property_room_images (property_id, room_id, media_id, image_url, is_cover, sort_order) VALUES (?,?,?,?,?,?)`
+        ).bind(propertyId, roomId, mediaId, url, i === 0 ? 1 : 0, i).run()
+        if (mediaId) {
+          await db.prepare(`UPDATE media_uploads SET property_id = ?, room_id = ? WHERE id = ?`).bind(propertyId, roomId, mediaId).run()
+        }
+      }
+    } catch (_) {}
+    const created = await db.prepare(`SELECT * FROM property_rooms WHERE id = ?`).bind(roomId).first()
     return c.json({ success: true, room: created })
   } catch (e: any) {
     return c.json({ success: false, error: e?.message || 'Failed to add room' })
@@ -833,9 +984,24 @@ app.post('/api/rooms/:id/update', async (c) => {
     const images = Array.isArray(body.images) ? body.images.map((s: any) => String(s).trim()).filter(Boolean) : []
     const isAvailable = body.is_available === 0 || body.is_available === false ? 0 : 1
     const sortOrder = parseInt(String(body.sort_order || 0)) || 0
+    const existing = await db.prepare(`SELECT property_id FROM property_rooms WHERE id = ?`).bind(roomId).first() as any
     await db.prepare(
       `UPDATE property_rooms SET room_name=?, room_type=?, description=?, price_per_night=?, max_guests=?, bedrooms=?, bathrooms=?, amenities=?, images=?, is_available=?, sort_order=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
     ).bind(roomName, roomType, description, pricePerNight, maxGuests, bedrooms, bathrooms, JSON.stringify(amenities), JSON.stringify(images), isAvailable, sortOrder, roomId).run()
+    try {
+      await db.prepare(`DELETE FROM property_room_images WHERE room_id = ?`).bind(roomId).run()
+      for (let i = 0; i < images.length; i++) {
+        const url = images[i]
+        const mMatch = url.match(/^\/api\/media\/(\d+)$/)
+        const mediaId = mMatch ? parseInt(mMatch[1]) : null
+        await db.prepare(
+          `INSERT INTO property_room_images (property_id, room_id, media_id, image_url, is_cover, sort_order) VALUES (?,?,?,?,?,?)`
+        ).bind(existing?.property_id || 0, roomId, mediaId, url, i === 0 ? 1 : 0, i).run()
+        if (mediaId) {
+          await db.prepare(`UPDATE media_uploads SET property_id = ?, room_id = ? WHERE id = ?`).bind(existing?.property_id || null, roomId, mediaId).run()
+        }
+      }
+    } catch (_) {}
     const updated = await db.prepare(`SELECT * FROM property_rooms WHERE id = ?`).bind(roomId).first()
     return c.json({ success: true, room: updated })
   } catch (e: any) {
@@ -849,6 +1015,7 @@ app.post('/api/rooms/:id/delete', async (c) => {
   const roomId = parseInt(c.req.param('id'))
   if (isNaN(roomId)) return c.json({ success: false, error: 'Invalid room ID' }, 400)
   try {
+    try { await db.prepare(`DELETE FROM property_room_images WHERE room_id = ?`).bind(roomId).run() } catch (_) {}
     await db.prepare(`DELETE FROM property_rooms WHERE id = ?`).bind(roomId).run()
     return c.json({ success: true })
   } catch (e: any) {
@@ -1000,9 +1167,11 @@ app.post('/admin/properties/save', async (c) => {
   const areaVal = str(body.area).trim()
   const lagosAreas = new Set(['Victoria Island','Lekki','Ikoyi','Ajah','Yaba','Surulere','Ikeja','Lagos Island','Apapa','Maryland','Gbagada','Magodo','Lekki Phase 1','Sangotedo','Banana Island','Eko Atlantic'])
   const abujaAreas = new Set(['Maitama','Wuse 2','Asokoro','Jabi','Garki','Utako','Guzape','Kubwa','Kado','Apo','Gwarinpa','Katampe','Lugbe','Kuje','Wuse','Central Business District','Durumi','Gudu','Lokogoma'])
+  const enuguAreas = new Set(['Independence Layout','New Haven','GRA Enugu','Trans-Ekulu','Achara Layout','Uwani','Coal Camp','Ogui','Enugu'])
   let cityVal = str(body.city).trim()
   if (!cityVal) {
     if (lagosAreas.has(areaVal)) cityVal = 'Lagos'
+    else if (enuguAreas.has(areaVal) || str(body.location).toLowerCase().includes('enugu')) cityVal = 'Enugu'
     else if (abujaAreas.has(areaVal)) cityVal = 'Abuja'
     else cityVal = 'Abuja'
   }
@@ -1025,6 +1194,52 @@ app.post('/admin/properties/save', async (c) => {
       try {
         await db.prepare(`UPDATE property_videos SET property_id=? WHERE property_listing_id=? AND property_id IS NULL`).bind(newId, listingId).run()
       } catch(_) {}
+
+      // Save any queued room types created before initial property save
+      const pendingRoomsRaw = (body.pending_rooms_json as string || '').trim()
+      if (pendingRoomsRaw) {
+        try {
+          const pendingRooms = JSON.parse(pendingRoomsRaw)
+          if (Array.isArray(pendingRooms)) {
+            for (let idx = 0; idx < pendingRooms.length; idx++) {
+              const rm = pendingRooms[idx]
+              const rmName = String(rm?.room_name || '').trim()
+              if (!rmName) continue
+              const rmImgs = Array.isArray(rm.images) ? rm.images.map((u: any) => String(u).trim()).filter(Boolean) : []
+              const rmAmens = Array.isArray(rm.amenities) ? rm.amenities.map((u: any) => String(u).trim()).filter(Boolean) : []
+              const rmRes = await db.prepare(
+                `INSERT INTO property_rooms (property_id, room_name, room_type, description, price_per_night, max_guests, bedrooms, bathrooms, amenities, images, is_available, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+              ).bind(
+                newId,
+                rmName,
+                String(rm.room_type || 'Room'),
+                String(rm.description || ''),
+                parseFloat(String(rm.price_per_night || 0)) || 0,
+                parseInt(String(rm.max_guests || 2)) || 2,
+                parseInt(String(rm.bedrooms || 1)) || 1,
+                parseInt(String(rm.bathrooms || 1)) || 1,
+                JSON.stringify(rmAmens),
+                JSON.stringify(rmImgs),
+                rm.is_available === 0 ? 0 : 1,
+                idx
+              ).run()
+              const rmId = rmRes.meta.last_row_id
+              for (let j = 0; j < rmImgs.length; j++) {
+                const mMatch = rmImgs[j].match(/^\/api\/media\/(\d+)$/)
+                const mediaId = mMatch ? parseInt(mMatch[1]) : null
+                await db.prepare(
+                  `INSERT INTO property_room_images (property_id, room_id, media_id, image_url, is_cover, sort_order) VALUES (?,?,?,?,?,?)`
+                ).bind(newId, rmId, mediaId, rmImgs[j], j === 0 ? 1 : 0, j).run()
+                if (mediaId) {
+                  await db.prepare(`UPDATE media_uploads SET property_id = ?, room_id = ? WHERE id = ?`).bind(newId, rmId, mediaId).run()
+                }
+              }
+            }
+          }
+        } catch (re) {
+          console.error('Pending rooms save error:', re)
+        }
+      }
       return c.redirect(`/admin/properties/${newId}/edit?saved=1`)
     }
   } catch (e: any) {
@@ -1796,23 +2011,190 @@ app.post('/api/inquiries', async (c) => {
   }
 })
 
-// API: Book Shortlet
+// API: Book Shortlet (Advanced Room Selection + Add-Ons + Promo + Availability Check)
 app.post('/api/bookings', async (c) => {
   const db = c.env.DB
   const body = await c.req.json()
   const ref = 'BK-' + Date.now()
   try {
-    const checkin = new Date(body.checkin)
-    const checkout = new Date(body.checkout)
+    const propertyId = body.property_id ? parseInt(String(body.property_id)) : null
+    const checkinStr = String(body.checkin || '').trim()
+    const checkoutStr = String(body.checkout || '').trim()
+    const guestName = String(body.name || '').trim()
+    const guestPhone = String(body.phone || '').trim()
+    if (!checkinStr || !checkoutStr || !guestName || !guestPhone) {
+      return c.json({ success: false, error: 'Check-in, check-out, full name, and phone number are required.' }, 400)
+    }
+    const checkin = new Date(checkinStr)
+    const checkout = new Date(checkoutStr)
     const nights = Math.ceil((checkout.getTime() - checkin.getTime()) / (1000 * 60 * 60 * 24))
-    const total = (body.price_per_night || 0) * nights
+    if (isNaN(nights) || nights < 1) {
+      return c.json({ success: false, error: 'Check-out date must be after check-in date.' }, 400)
+    }
 
-    await db.prepare(
-      `INSERT INTO bookings (booking_ref, property_id, property_listing_id, property_title, checkin_date, checkout_date, nights, guests, guest_name, guest_phone, guest_email, special_requests, price_per_night, total_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-    ).bind(ref, body.property_id||null, body.listing_id||'', body.title||'', body.checkin, body.checkout, nights, body.guests||1, body.name, body.phone, body.email||'', body.requests||'', body.price_per_night||0, total).run()
-    return c.json({ success: true, booking_ref: ref, total })
-  } catch (e) {
-    return c.json({ success: false })
+    let prop: any = null
+    if (propertyId) {
+      prop = await db.prepare(`SELECT id, listing_id, title, price, price_per_night, min_nights, max_nights FROM properties WHERE id = ?`).bind(propertyId).first()
+    }
+    if (prop) {
+      const minNights = Number(prop.min_nights || 1)
+      const maxNights = Number(prop.max_nights || 60)
+      if (nights < minNights) {
+        return c.json({ success: false, error: `Minimum stay for this property is ${minNights} night${minNights > 1 ? 's' : ''}.` }, 400)
+      }
+      if (nights > maxNights) {
+        return c.json({ success: false, error: `Maximum stay per online reservation is ${maxNights} nights.` }, 400)
+      }
+    }
+
+    const roomId = body.room_id ? parseInt(String(body.room_id)) : null
+    let roomName = String(body.room_name || '').trim() || null
+    let nightlyRate = Number(body.price_per_night || prop?.price_per_night || prop?.price || 0)
+    let maxGuests = 10
+
+    if (roomId) {
+      const room = await db.prepare(`SELECT * FROM property_rooms WHERE id = ?`).bind(roomId).first() as any
+      if (!room) return c.json({ success: false, error: 'Selected room type was not found.' }, 400)
+      if (room.is_available === 0) return c.json({ success: false, error: 'Selected room type is currently unavailable.' }, 400)
+      roomName = room.room_name
+      if (Number(room.price_per_night) > 0) nightlyRate = Number(room.price_per_night)
+      maxGuests = Number(room.max_guests || 4)
+    }
+
+    const adults = Math.max(1, parseInt(String(body.adults || body.guests || 1)) || 1)
+    const children = Math.max(0, parseInt(String(body.children || 0)) || 0)
+    const totalGuests = adults + children
+    if (roomId && totalGuests > maxGuests) {
+      return c.json({ success: false, error: `${roomName || 'Selected room'} accommodates up to ${maxGuests} guests.` }, 400)
+    }
+
+    // Check overlap against confirmed bookings for this room (or whole property)
+    if (propertyId) {
+      let conflictQ = `SELECT id, checkin_date, checkout_date FROM bookings WHERE property_id = ? AND status = 'confirmed' AND checkin_date < ? AND checkout_date > ?`
+      const conflictParams: any[] = [propertyId, checkoutStr, checkinStr]
+      if (roomId) {
+        conflictQ += ` AND (room_id = ? OR room_id IS NULL)`
+        conflictParams.push(roomId)
+      }
+      const conflict = await db.prepare(conflictQ).bind(...conflictParams).first()
+      if (conflict) {
+        return c.json({ success: false, error: 'Selected dates overlap with a confirmed reservation. Please choose different dates or another room type.' }, 409)
+      }
+    }
+
+    // Authoritative add-ons calculation
+    const addonCatalog: Record<string, { label: string; price: number; perNight?: boolean }> = {
+      airport_pickup: { label: 'Airport Chauffeur Pickup', price: 25000 },
+      early_late: { label: 'Early Check-in & Late Check-out', price: 15000 },
+      breakfast_chef: { label: 'Daily Breakfast / Private Chef', price: 12000, perNight: true },
+      laundry: { label: 'Express Laundry & Pressing', price: 8000 },
+    }
+    const requestedAddons = Array.isArray(body.addons) ? body.addons.map((a: any) => String(a)) : []
+    const validAddons: Array<{ key: string; label: string; cost: number }> = []
+    let addonsTotal = 0
+    for (const key of requestedAddons) {
+      const def = addonCatalog[key]
+      if (def) {
+        const cost = def.perNight ? def.price * nights : def.price
+        addonsTotal += cost
+        validAddons.push({ key, label: def.label, cost })
+      }
+    }
+
+    const subtotal = nightlyRate * nights
+    const promoRaw = String(body.promo_code || '').trim().toUpperCase()
+    let discountRate = 0
+    let appliedPromo = ''
+    if (promoRaw === 'RICHGATE15') {
+      discountRate = 0.15
+      appliedPromo = 'RICHGATE15'
+    } else if (promoRaw === 'PURECREST10') {
+      discountRate = 0.10
+      appliedPromo = 'PURECREST10'
+    } else if (nights >= 7) {
+      discountRate = 0.10
+      appliedPromo = 'EXTENDED7+'
+    }
+    const discountAmount = Math.round(subtotal * discountRate)
+    const total = Math.max(0, subtotal - discountAmount + addonsTotal)
+
+    const arrivalTime = String(body.arrival_time || '14:00 - 17:00').trim()
+    const stayPurpose = String(body.stay_purpose || 'Leisure / Holiday').trim()
+    const paymentMethod = String(body.payment_method || 'transfer').trim()
+    const specialRequests = String(body.requests || '').trim()
+
+    try {
+      await db.prepare(
+        `INSERT INTO bookings (booking_ref, property_id, property_listing_id, property_title, room_id, room_name, checkin_date, checkout_date, nights, guests, adults, children, guest_name, guest_phone, guest_email, special_requests, arrival_time, stay_purpose, addons, addons_total, promo_code, discount_amount, payment_method, price_per_night, total_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        ref,
+        propertyId,
+        body.listing_id || prop?.listing_id || '',
+        body.title || prop?.title || '',
+        roomId,
+        roomName,
+        checkinStr,
+        checkoutStr,
+        nights,
+        totalGuests,
+        adults,
+        children,
+        guestName,
+        guestPhone,
+        String(body.email || '').trim(),
+        specialRequests,
+        arrivalTime,
+        stayPurpose,
+        JSON.stringify(validAddons),
+        addonsTotal,
+        appliedPromo,
+        discountAmount,
+        paymentMethod,
+        nightlyRate,
+        total
+      ).run()
+    } catch {
+      // Fallback insert if optional columns are missing on legacy DB
+      await db.prepare(
+        `INSERT INTO bookings (booking_ref, property_id, property_listing_id, property_title, room_id, room_name, checkin_date, checkout_date, nights, guests, guest_name, guest_phone, guest_email, special_requests, price_per_night, total_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        ref,
+        propertyId,
+        body.listing_id || prop?.listing_id || '',
+        body.title || prop?.title || '',
+        roomId,
+        roomName,
+        checkinStr,
+        checkoutStr,
+        nights,
+        totalGuests,
+        guestName,
+        guestPhone,
+        String(body.email || '').trim(),
+        specialRequests,
+        nightlyRate,
+        total
+      ).run()
+    }
+
+    return c.json({
+      success: true,
+      booking_ref: ref,
+      nights,
+      room_id: roomId,
+      room_name: roomName,
+      subtotal,
+      addons_total: addonsTotal,
+      discount_amount: discountAmount,
+      promo_code: appliedPromo,
+      total,
+      checkin: checkinStr,
+      checkout: checkoutStr,
+      guests: totalGuests,
+    })
+  } catch (e: any) {
+    console.error('Booking error:', e?.message || e)
+    return c.json({ success: false, error: e?.message || 'Booking submission failed.' }, 500)
   }
 })
 
@@ -1872,6 +2254,38 @@ app.post('/find-my-home', async (c) => {
     console.error('Find-my-home error:', e)
     const settings = await getSiteSettings(db)
     return c.html(findMyHomePage(settings, 'An error occurred submitting your request. Please try again or contact us directly.'))
+  }
+})
+
+// API: Homepage "Let Us Help You Find Your Next Property" JSON submission
+app.post('/api/property-requests', async (c) => {
+  const db = c.env.DB
+  try {
+    const body = await c.req.json()
+    const fullName = String(body.full_name || body.name || '').trim()
+    const phone = String(body.phone || '').trim()
+    if (!fullName || !phone) {
+      return c.json({ success: false, error: 'Full name and phone number are required.' }, 400)
+    }
+    const res = await db.prepare(
+      `INSERT INTO property_requests (full_name, phone, email, request_type, property_type, city, area_preference, bedrooms, budget_max, additional_details, source)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(
+      fullName,
+      phone,
+      String(body.email || '').trim(),
+      String(body.request_type || 'buy').trim(),
+      String(body.property_type || 'Apartment').trim(),
+      String(body.city || '').trim(),
+      String(body.area_preference || '').trim(),
+      String(body.bedrooms || '').trim(),
+      parseFloat(String(body.budget_max || '0')) || 0,
+      String(body.additional_details || '').trim(),
+      String(body.source || 'homepage-finder').trim()
+    ).run()
+    return c.json({ success: true, id: res.meta?.last_row_id || null })
+  } catch (e: any) {
+    return c.json({ success: false, error: e?.message || 'Could not save property request.' }, 500)
   }
 })
 
@@ -2309,42 +2723,55 @@ function categoryBadge(cat: string): string {
 
 function propertyCard(prop: any): string {
   const imgs = getImages(prop)
-  const price = formatPrice(prop.price, prop.price_period, prop.category)
+  const displayPrice = prop.category === 'short-let' && prop.min_room_price
+    ? prop.min_room_price
+    : prop.price
+  const price = formatPrice(displayPrice, prop.price_period, prop.category)
+  const pricePrefix = prop.category === 'short-let' && prop.min_room_price ? 'From ' : ''
+  const catLabelMap: Record<string, string> = {
+    'buy': 'For Sale',
+    'rent': 'For Rent',
+    'short-let': 'Short Let',
+    'land': 'Land',
+    'commercial': 'Commercial'
+  }
+  const catLabel = catLabelMap[prop.category] || prop.category
   const cardImg = imgs.length > 0
-    ? `<img src="${imgs[0]}" alt="${prop.title}" class="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" /><div class="absolute inset-0 flex-col items-center justify-center bg-gradient-to-br from-gray-100 to-gray-200" style="display:none;"><i class='fas fa-image text-4xl text-gray-300 mb-2'></i><span class='text-xs text-gray-400 font-medium'>No Image</span></div>`
-    : `<div class="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-gray-100 to-gray-200"><i class='fas fa-image text-4xl text-gray-300 mb-2'></i><span class='text-xs text-gray-400 font-medium'>No Image Yet</span></div>`
+    ? `<img src="${escHtml(imgs[0])}" alt="${escHtml(prop.title)}" class="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" /><div class="absolute inset-0 flex-col items-center justify-center bg-gradient-to-br from-[#051C12] to-[#0B1F3A] text-white/60" style="display:none;"><i class='fas fa-building text-3xl mb-2 text-[#C9A84C]'></i><span class='text-xs font-medium tracking-wide uppercase'>PureCrest Residence</span></div>`
+    : `<div class="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-[#051C12] to-[#0B1F3A] text-white/60"><i class='fas fa-building text-3xl mb-2 text-[#C9A84C]'></i><span class='text-xs font-medium tracking-wide uppercase'>PureCrest Residence</span></div>`
+
+  const locDisplay = `${prop.area || ''}${prop.city ? (prop.area ? ', ' : '') + prop.city : ''}` || prop.location || 'Nigeria'
+  const specs: string[] = []
+  if (prop.rooms_count && Number(prop.rooms_count) > 0) specs.push(`${prop.rooms_count} Room Types`)
+  if (prop.category !== 'land' && prop.bedrooms > 0) specs.push(`${prop.bedrooms} Bed`)
+  if (prop.category !== 'land' && prop.bathrooms > 0) specs.push(`${prop.bathrooms} Bath`)
+  if (prop.size_sqm) specs.push(`${prop.size_sqm} sqm`)
+
   return `
-  <div class="bg-white rounded-2xl shadow-md overflow-hidden hover:shadow-xl transition-all duration-300 group">
-    <a href="/property/${prop.listing_id}" class="block">
-      <div class="relative overflow-hidden" style="padding-top:66.67%;">
+  <article data-cat="${escHtml(prop.category || '')}" class="prop-card-item bg-white rounded-xl border border-[#e8e6e0] overflow-hidden hover:shadow-xl hover:-translate-y-1 transition-all duration-300 group flex flex-col">
+    <a href="/property/${escHtml(prop.listing_id)}" class="flex flex-col flex-1" style="text-decoration:none;">
+      <div class="relative overflow-hidden bg-[#051C12]" style="padding-top:66.67%;">
         ${cardImg}
-        <div class="absolute top-3 left-3 flex gap-2">
-          ${categoryBadge(prop.category)}
-          ${prop.is_featured ? '<span class="text-xs font-semibold px-2 py-1 rounded-full bg-amber-500 text-white">Featured</span>' : ''}
+        <div class="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/55 to-transparent pointer-events-none"></div>
+        <div class="absolute top-3 left-3 flex items-center gap-1.5">
+          <span class="text-[11px] font-bold uppercase tracking-wider px-2.5 py-1 rounded bg-[#051C12]/90 text-white backdrop-blur-sm">${escHtml(catLabel)}</span>
+          ${prop.is_featured ? '<span class="text-[11px] font-bold uppercase tracking-wider px-2.5 py-1 rounded bg-[#C9A84C] text-[#051C12]">Featured</span>' : ''}
+        </div>
+        ${prop.rooms_count && Number(prop.rooms_count) > 0 ? `<div class="absolute bottom-2.5 left-3 text-[11px] font-semibold text-white/95 flex items-center gap-1.5"><i class="fas fa-bed text-[#C9A84C]"></i> ${prop.rooms_count} Suite Options</div>` : ''}
+      </div>
+      <div class="p-4 flex-1 flex flex-col">
+        <p class="text-lg font-bold text-[#051C12] mb-1 tabular-nums">${pricePrefix}${price}</p>
+        <h3 class="font-semibold text-gray-900 mb-1.5 line-clamp-2 leading-snug group-hover:text-[#A8883A] transition-colors">${escHtml(prop.title)}</h3>
+        <p class="text-xs text-gray-500 mb-3 flex items-center gap-1.5">
+          <i class="fas fa-map-marker-alt text-[#C9A84C] flex-shrink-0"></i>
+          <span class="truncate">${escHtml(locDisplay)}</span>
+        </p>
+        <div class="mt-auto pt-3 border-t border-gray-100 text-xs text-gray-500 font-medium tabular-nums">
+          ${specs.length > 0 ? specs.join(' · ') : (prop.category === 'land' ? 'Verified Land Title' : 'Available Now')}
         </div>
       </div>
-      <div class="p-4">
-        <p class="text-xl font-bold text-[#1a1040] mb-1">${price}</p>
-        <h3 class="font-semibold text-gray-800 mb-1 line-clamp-2">${prop.title}</h3>
-        <p class="text-sm text-gray-500 mb-3 flex items-center gap-1">
-          ${prop.category !== 'short-let' ? `<svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>` : ''}
-          ${prop.category === 'short-let' ? (prop.area || '') : `${prop.area}${prop.city ? ', ' + prop.city : ''}`}
-        </p>
-        ${prop.category !== 'land' && prop.category !== 'short-let' ? `
-        <div class="flex gap-3 text-sm text-gray-500 border-t pt-3">
-          ${prop.bedrooms > 0 ? `<span class="flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>${prop.bedrooms} Bed</span>` : ''}
-          ${prop.bathrooms > 0 ? `<span class="flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4M4 10h16v11H4V10z"/></svg>${prop.bathrooms} Bath</span>` : ''}
-          ${prop.size_sqm ? `<span class="flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>${prop.size_sqm}sqm</span>` : ''}
-          ${prop.year_built ? `<span class="flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>${prop.year_built}</span>` : ''}
-        </div>` : prop.category === 'short-let' ? `
-        <div class="flex gap-3 text-sm text-gray-500 border-t pt-3">
-          ${prop.bedrooms > 0 ? `<span class="flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>${prop.bedrooms} Bed</span>` : ''}
-          ${prop.bathrooms > 0 ? `<span class="flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4M4 10h16v11H4V10z"/></svg>${prop.bathrooms} Bath</span>` : ''}
-          ${prop.size_sqm ? `<span class="flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>${prop.size_sqm}sqm</span>` : ''}
-        </div>` : `<p class="text-sm text-gray-500 border-t pt-3">${prop.size_sqm ? prop.size_sqm + ' sqm' : 'Land'}</p>`}
-      </div>
     </a>
-  </div>`
+  </article>`
 }
 
 function adBanner(ad: any): string {
@@ -2839,78 +3266,100 @@ ${content}
 // HOME PAGE
 // ==========================================
 function homePage(featured: any[], recent: any[], settings: Record<string, string>, ads: any[], recentPosts: any[] = []): string {
-  const heroTitleHtml = formatMultiline(settings.hero_title, 'Hospitality & Property\nManagement Solutions')
-  const heroSubtitle = escHtml((settings.hero_subtitle && settings.hero_subtitle.trim()) || 'Purecrest delivers world-class hotel management, short-let operations, property sales, leasing, and real estate advisory — helping owners maximise returns and guests enjoy exceptional stays.')
-  const heroBg = settings.hero_bg_image || '/static/hero-bg.jpg'
-  const heroCta1Text = escHtml(settings.hero_cta_1_text || 'Contact Us')
-  const heroCta1Url = escHtml(settings.hero_cta_1_url || '/contact')
-  const heroCta2Text = escHtml(settings.hero_cta_2_text || 'Our Services')
-  const heroCta2Url = escHtml(settings.hero_cta_2_url || '/services')
+  const rawHeroTitle = (settings.hero_title || '').trim()
+  const heroTitleHtml = formatMultiline(
+    !rawHeroTitle || rawHeroTitle.includes('Find Your Premium Property') ? 'Hospitality & Property\nManagement' : rawHeroTitle,
+    'Hospitality & Property\nManagement'
+  )
+  const heroSubtitle = escHtml((settings.hero_subtitle && settings.hero_subtitle.trim()) || 'Purecrest delivers premier hotel & short-let management, property sales, leasing, and real estate advisory across Nigeria — helping property owners maximize returns and guests enjoy exceptional stays.')
+  const heroBg = settings.hero_bg_image && settings.hero_bg_image !== '/static/hero-bg.jpg'
+    ? settings.hero_bg_image
+    : '/src/assets/images/hero_purecrest_residence_1795731930518.jpg'
+  const heroCta1Text = escHtml('Our Services')
+  const heroCta1Url = escHtml('/services')
+  const heroCta2Text = escHtml('Contact Us')
+  const heroCta2Url = escHtml('/contact')
   const serviceImg1 = settings.service_img_hospitality || '/static/service-hospitality.jpg'
   const serviceImg2 = settings.service_img_property || '/static/service-property.jpg'
   const serviceImg3 = settings.service_img_solutions || '/static/service-solutions.jpg'
-  const otaBannerImg = settings.ota_banner_image || '/static/ota-ad-banner.png'
+
+  // Identify Richgate Apartments Enugu spotlight property for the Featured Residences section below
+  const richgateProp = featured.find((p: any) => p.listing_id === 'PC-ENUGU-01' || (p.title || '').toLowerCase().includes('richgate'))
+    || recent.find((p: any) => p.listing_id === 'PC-ENUGU-01' || (p.title || '').toLowerCase().includes('richgate'))
+  const richgateImgs = richgateProp ? getImages(richgateProp) : []
+  const richgateHeroThumb = richgateImgs[0] || '/assets/aistudio/file_000000003fc881f4b5e66b7352a17edc_c7ca46a2.png'
+  const richgateRoomsPreview: any[] = Array.isArray(richgateProp?.rooms_preview) ? richgateProp.rooms_preview : []
+  const richgateStartPrice = richgateProp?.min_room_price || richgateProp?.price_per_night || 55000
+  const otherFeatured = richgateProp
+    ? featured.filter((p: any) => p.id !== richgateProp.id && p.listing_id !== richgateProp.listing_id)
+    : featured
 
   const content = `
-  <!-- HERO SECTION: Full-width hospitality & property management messaging -->
-  <section style="background:var(--forest); position:relative; overflow:hidden; min-height:580px; display:flex; align-items:center;">
-    <!-- Background image -->
-    <div style="position:absolute; inset:0; background-image:url('${escHtml(heroBg)}'); background-size:cover; background-position:center; background-repeat:no-repeat;"></div>
-    <!-- Dark gradient overlay for readability -->
-    <div style="position:absolute; inset:0; background:linear-gradient(105deg, rgba(5,28,18,0.93) 0%, rgba(5,28,18,0.80) 55%, rgba(11,31,58,0.70) 100%);"></div>
-    <!-- Decorative gold accent line -->
-    <div style="position:absolute; left:0; top:0; bottom:0; width:4px; background:linear-gradient(to bottom, transparent, var(--gold), transparent);"></div>
-    
-    <div class="max-w-7xl mx-auto px-6 w-full" style="position:relative; z-index:2; padding-top:80px; padding-bottom:80px;">
-      <div style="max-width:760px;">
-        <!-- Main headline -->
-        <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(2.4rem,5.5vw,4.2rem); line-height:1.07; color:#fff; margin-bottom:24px; font-weight:400;">
-          ${heroTitleHtml}
-        </h1>
-        <!-- Subtext -->
-        <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:1.05rem; line-height:1.8; color:rgba(255,255,255,0.78); margin-bottom:36px; max-width:580px;">
-          ${heroSubtitle}
-        </p>
-        <!-- CTAs -->
-        <div style="display:flex; gap:14px; flex-wrap:wrap;">
-          <a href="${heroCta1Url}" class="btn-primary">${heroCta1Text}</a>
-          <a href="${heroCta2Url}" class="btn-outline">${heroCta2Text}</a>
+  <!-- HERO SECTION: Hospitality & Property Management -->
+  <section style="background:var(--forest); position:relative; overflow:hidden; min-height:560px; display:flex; align-items:center;">
+    <img src="${escHtml(heroBg)}" alt="Purecrest Hospitality and Property Management" style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center;" onerror="this.src='/static/hero-bg.jpg'" />
+    <div style="position:absolute; inset:0; background:linear-gradient(100deg, rgba(5,28,18,0.95) 0%, rgba(5,28,18,0.84) 55%, rgba(11,31,58,0.68) 100%);"></div>
+
+    <div class="max-w-7xl mx-auto px-6 w-full" style="position:relative; z-index:2; padding-top:84px; padding-bottom:90px;">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+        <div class="lg:col-span-8">
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; font-weight:700; letter-spacing:0.2em; text-transform:uppercase; color:var(--gold); margin-bottom:16px;">
+            Hospitality Management · Property Advisory · Nigeria
+          </p>
+          <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(2.45rem,5vw,4.2rem); line-height:1.06; color:#fff; margin-bottom:22px; font-weight:400; text-wrap:balance; max-width:740px;">
+            ${heroTitleHtml}
+          </h1>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:1.03rem; line-height:1.78; color:rgba(255,255,255,0.82); margin-bottom:34px; max-width:580px;">
+            ${heroSubtitle}
+          </p>
+          <div style="display:flex; gap:14px; flex-wrap:wrap; align-items:center;">
+            <a href="${heroCta1Url}" class="btn-primary whitespace-nowrap shrink-0">${heroCta1Text} <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
+            <a href="${heroCta2Url}" class="btn-outline whitespace-nowrap shrink-0">${heroCta2Text}</a>
+          </div>
+        </div>
+
+        <div class="lg:col-span-4 hidden lg:block">
+          <div style="background:rgba(5,28,18,0.72); backdrop-filter:blur(12px); border:1px solid rgba(201,168,76,0.28); border-radius:14px; padding:28px 26px; color:#fff;">
+            <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.16em; text-transform:uppercase; color:var(--gold); margin-bottom:16px;">Core Practice Areas</p>
+            <div style="display:flex; flex-direction:column; gap:16px;">
+              ${[
+                { num: '01', title: 'Hotel & Short-Let Operations', desc: 'Full-service daily operations, staffing, and revenue management.' },
+                { num: '02', title: 'Property Sales & Leasing', desc: 'Verified residential, commercial, and land brokerage.' },
+                { num: '03', title: 'OTA Channel Optimization', desc: 'Higher visibility across Airbnb, Booking.com & Expedia.' },
+              ].map((item, idx) => `
+              <div style="${idx > 0 ? 'padding-top:14px; border-top:1px solid rgba(255,255,255,0.1);' : ''}">
+                <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.84rem; font-weight:700; color:#fff; margin:0 0 3px;"><span style="color:var(--gold); margin-right:6px;" class="tabular-nums">${item.num}.</span>${item.title}</p>
+                <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.78rem; color:rgba(255,255,255,0.68); margin:0; line-height:1.5;">${item.desc}</p>
+              </div>`).join('')}
+            </div>
+          </div>
         </div>
       </div>
     </div>
   </section>
 
   <!-- HOME QUICK SEARCH BAR -->
-  <section style="background:#fff; padding:32px 0; border-bottom:1px solid #f0ede8;">
-    <div class="max-w-6xl mx-auto px-4 md:px-6">
-      <form method="GET" action="/properties" style="background:var(--cream); border-radius:12px; padding:16px 20px; border:1.5px solid #e8e4df;">
-        <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; color:#888; letter-spacing:0.12em; text-transform:uppercase; margin-bottom:12px; display:flex; align-items:center; gap:6px;"><i class="fas fa-search" style="color:var(--gold);"></i> Quick Property Search</p>
-        <div style="display:grid; grid-template-columns:2fr 1fr 1fr 1fr auto; gap:10px; align-items:center;" class="home-search-grid">
-          <input type="text" name="q" placeholder="Search by area, property name..." style="padding:10px 14px; border:1.5px solid #ddd; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; width:100%;" />
-          <select name="category" style="padding:10px 14px; border:1.5px solid #ddd; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;">
-            <option value="">Property Type</option>
+  <section style="background:#fff; padding:28px 0; border-bottom:1px solid #ebe7df;">
+    <div class="max-w-7xl mx-auto px-4 md:px-6">
+      <form method="GET" action="/properties" style="background:var(--cream); border-radius:12px; padding:18px 22px; border:1px solid #e4dfd6;">
+        <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; color:#6b6b66; letter-spacing:0.14em; text-transform:uppercase; margin-bottom:12px; display:flex; align-items:center; gap:7px;"><i class="fas fa-search" style="color:var(--gold);"></i> Search Residences, Shortlets &amp; Land Across Nigeria</p>
+        <div style="display:grid; grid-template-columns:2fr 1fr 1.1fr 1fr auto; gap:10px; align-items:center;" class="home-search-grid">
+          <input type="text" name="q" placeholder="Search Richgate, Independence Layout, Maitama, Lekki..." style="padding:11px 14px; border:1.5px solid #dcd8cf; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;" />
+          <select name="category" style="padding:11px 14px; border:1.5px solid #dcd8cf; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;">
+            <option value="">All Categories</option>
+            <option value="short-let">Short Let</option>
             <option value="buy">For Sale</option>
             <option value="rent">For Rent</option>
-            <option value="short-let">Short Let</option>
             <option value="land">Land</option>
           </select>
-          <select name="area" style="padding:10px 14px; border:1.5px solid #ddd; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;">
-            <option value="">Select Area</option>
-            <optgroup label="— Lagos —">
-              <option value="Victoria Island">Victoria Island</option>
-              <option value="Lekki">Lekki</option>
-              <option value="Ikoyi">Ikoyi</option>
-              <option value="Ajah">Ajah</option>
-              <option value="Yaba">Yaba</option>
-              <option value="Surulere">Surulere</option>
-              <option value="Ikeja">Ikeja</option>
-              <option value="Lagos Island">Lagos Island</option>
-              <option value="Apapa">Apapa</option>
-              <option value="Maryland">Maryland</option>
-              <option value="Gbagada">Gbagada</option>
-              <option value="Magodo">Magodo</option>
-              <option value="Lekki Phase 1">Lekki Phase 1</option>
-              <option value="Sangotedo">Sangotedo</option>
+          <select name="area" style="padding:11px 14px; border:1.5px solid #dcd8cf; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;">
+            <option value="">All Locations</option>
+            <optgroup label="— Enugu —">
+              <option value="Independence Layout">Independence Layout, Enugu</option>
+              <option value="New Haven">New Haven, Enugu</option>
+              <option value="GRA Enugu">GRA Enugu</option>
+              <option value="Trans-Ekulu">Trans-Ekulu, Enugu</option>
+              <option value="Achara Layout">Achara Layout, Enugu</option>
             </optgroup>
             <optgroup label="— Abuja (FCT) —">
               <option value="Maitama">Maitama</option>
@@ -2920,23 +3369,26 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
               <option value="Garki">Garki</option>
               <option value="Utako">Utako</option>
               <option value="Guzape">Guzape</option>
-              <option value="Lugbe">Lugbe</option>
-              <option value="Kubwa">Kubwa</option>
-              <option value="Kado">Kado</option>
-              <option value="Apo">Apo</option>
               <option value="Gwarinpa">Gwarinpa</option>
               <option value="Katampe">Katampe</option>
-              <option value="Lokogoma">Lokogoma</option>
+            </optgroup>
+            <optgroup label="— Lagos —">
+              <option value="Victoria Island">Victoria Island</option>
+              <option value="Ikoyi">Ikoyi</option>
+              <option value="Lekki">Lekki</option>
+              <option value="Lekki Phase 1">Lekki Phase 1</option>
+              <option value="Ikeja">Ikeja</option>
+              <option value="Ajah">Ajah</option>
             </optgroup>
           </select>
-          <select name="beds" style="padding:10px 14px; border:1.5px solid #ddd; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;">
+          <select name="beds" style="padding:11px 14px; border:1.5px solid #dcd8cf; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;">
             <option value="">Bedrooms</option>
             <option value="1">1+ Beds</option>
             <option value="2">2+ Beds</option>
             <option value="3">3+ Beds</option>
             <option value="4">4+ Beds</option>
           </select>
-          <button type="submit" style="padding:11px 24px; background:var(--forest); color:#fff; border:none; border-radius:8px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; font-weight:700; cursor:pointer; white-space:nowrap; display:flex; align-items:center; gap:6px;" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">
+          <button type="submit" class="whitespace-nowrap shrink-0" style="padding:11px 24px; background:var(--forest); color:#fff; border:none; border-radius:8px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:7px;" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">
             <i class="fas fa-search"></i> Search
           </button>
         </div>
@@ -2948,91 +3400,305 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
     </div>
   </section>
 
-  <!-- WHAT WE DO SECTION -->
-  <section style="background:#fff; padding:80px 0 60px;">
+  <!-- FEATURED RESIDENCES & RICHGATE ENUGU SPOTLIGHT -->
+  <section id="featured-residences" style="background:#F2F0EB; padding:76px 0;">
     <div class="max-w-7xl mx-auto px-6">
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:60px; align-items:start; margin-bottom:60px;" class="what-we-do-grid">
-        <!-- Left: Heading -->
+      <div class="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-8">
         <div>
-          <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(2rem,4vw,3.2rem); line-height:1.1; color:#1a1a1a; font-weight:400; margin:0;">${formatMultiline(settings.whatwedo_title, 'Integrated Solutions.\nEndless Possibilities.')}</h2>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold-dark); margin-bottom:8px;">Curated Portfolio</p>
+          <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.85rem,3.4vw,2.75rem); color:var(--forest); margin:0; font-weight:400; line-height:1.12; text-wrap:balance;">Featured Residences &amp; Shortlets</h2>
         </div>
-        <!-- Right: Description -->
-        <div style="padding-top:32px;">
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.8; color:#555; max-width:460px;">${escHtml(settings.whatwedo_body || 'Purecrest is a dynamic company providing end-to-end solutions in hospitality and real estate. From premium hospitality management to property development and investment advisory, we create spaces and experiences that stand the test of time.')}</p>
+        <div class="flex flex-wrap items-center gap-2" role="tablist" aria-label="Filter featured listings">
+          ${[
+            ['all', 'All Featured'],
+            ['short-let', 'Short Lets'],
+            ['buy', 'For Sale'],
+            ['rent', 'For Rent'],
+          ].map(([key, lbl], i) => `
+          <button type="button" data-home-filter="${key}" onclick="filterHomeFeatured('${key}', this)" class="home-feat-tab whitespace-nowrap shrink-0 px-4 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer ${i === 0 ? 'bg-[#051C12] text-white' : 'bg-white text-gray-700 border border-[#dfdacf] hover:border-[#C9A84C]'}">${lbl}</button>`).join('')}
+          <a href="/properties" class="whitespace-nowrap shrink-0 ml-1 px-3 py-2 text-xs font-bold text-[#051C12] hover:text-[#A8883A] inline-flex items-center gap-1.5" style="text-decoration:none;">
+            All Listings <i class="fas fa-arrow-right text-[10px]"></i>
+          </a>
         </div>
       </div>
-      <!-- Service Cards: 3 columns then 1 wide below -->
-      <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:24px; margin-bottom:24px;" class="services-grid">
-        <!-- Purecrest Hospitality -->
-        <a href="/hospitality" class="service-card" style="text-decoration:none; display:block; cursor:pointer;">
-          <div style="height:200px; overflow:hidden; position:relative; background:linear-gradient(135deg,var(--forest-mid),var(--forest));">
+
+      ${richgateProp ? `
+      <!-- RICHGATE APARTMENTS ENUGU — FEATURED SHORTLET SPOTLIGHT -->
+      <div data-cat="short-let" class="prop-card-item mb-8 bg-white rounded-2xl border border-[#dfd9cc] overflow-hidden shadow-md">
+        <div class="grid grid-cols-1 lg:grid-cols-12">
+          <!-- Left Photo & Tag -->
+          <div class="lg:col-span-6 relative min-h-[300px] lg:min-h-[380px] bg-[#051C12] overflow-hidden">
+            <img src="${escHtml(richgateHeroThumb)}" alt="${escHtml(richgateProp.title)}" class="w-full h-full object-cover" />
+            <div style="position:absolute; inset:0; background:linear-gradient(to top, rgba(5,28,18,0.86) 0%, rgba(5,28,18,0.18) 50%, transparent 100%);"></div>
+            <div style="position:absolute; top:16px; left:16px; display:flex; gap:8px; flex-wrap:wrap;">
+              <span style="background:var(--gold); color:#051C12; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.68rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; padding:5px 11px; border-radius:4px;">Featured Shortlet</span>
+              <span style="background:rgba(5,28,18,0.88); color:#fff; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.68rem; font-weight:600; padding:5px 11px; border-radius:4px;">Enugu · Independence Layout</span>
+            </div>
+            <div style="position:absolute; bottom:18px; left:20px; right:20px; color:#fff;">
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.75rem; color:rgba(255,255,255,0.8); margin:0 0 4px;">
+                24/7 Power &amp; Solar · Starlink Fibre WiFi · VIP Concierge · Daily Housekeeping
+              </p>
+              <p style="font-family:'DM Serif Display',serif; font-size:1.55rem; margin:0;" class="tabular-nums">
+                From ₦${Number(richgateStartPrice).toLocaleString('en-NG')} <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.85rem; font-weight:400; color:rgba(255,255,255,0.75);">/ night</span>
+              </p>
+            </div>
+          </div>
+
+          <!-- Right Details + Live Room Types Picker Preview -->
+          <div class="lg:col-span-6 p-6 md:p-8 flex flex-col justify-between">
+            <div>
+              <div class="flex items-start justify-between gap-3 mb-2">
+                <div>
+                  <p class="text-[11px] font-bold uppercase tracking-widest text-[#A8883A] mb-1">Signature Enugu Residence</p>
+                  <h3 style="font-family:'DM Serif Display',serif; font-size:clamp(1.5rem,2.4vw,2rem); color:var(--forest); margin:0; font-weight:400; line-height:1.15;">${escHtml(richgateProp.title)}</h3>
+                </div>
+                <span class="text-xs font-mono font-semibold text-gray-500 pt-1 shrink-0">${escHtml(richgateProp.listing_id)}</span>
+              </div>
+              <p class="text-xs text-gray-600 mb-3 flex items-center gap-1.5">
+                <i class="fas fa-map-marker-alt text-[#C9A84C]"></i>
+                <span>${escHtml(richgateProp.address ? richgateProp.address + ', ' : '')}${escHtml(richgateProp.area || 'Independence Layout')}, ${escHtml(richgateProp.city || 'Enugu')}</span>
+              </p>
+              <p class="text-sm text-gray-600 leading-relaxed mb-5 line-clamp-2">${escHtml(richgateProp.description || '')}</p>
+
+              <!-- Room Types Grid -->
+              <p class="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-2.5">Serviced Apartments &amp; Hotel Rooms (${richgateRoomsPreview.length || 8} Options)</p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mb-5">
+                ${(richgateRoomsPreview.length > 0 ? richgateRoomsPreview : [
+                  { room_name: 'RM-1 Deluxe Studio with Kitchenette', price_per_night: 65500, images: '["/assets/aistudio/C9775D2D-5C32-4EDC-9072-A3320F21BA93_0df87c78.png"]' },
+                  { room_name: 'RM-2 One Bedroom Suite Apartment', price_per_night: 80000, images: '["/assets/aistudio/IMG_1793_3e8044d1.jpeg"]' },
+                  { room_name: 'RM-3 Standard Studio with Kitchenette', price_per_night: 55000, images: '["/assets/aistudio/IMG_2050_feea3d0a.png"]' },
+                  { room_name: 'RM-8 One Bedroom Suite', price_per_night: 75000, images: '["/assets/aistudio/IMG_2192_852c7555.png"]' },
+                ]).slice(0, 4).map((rm: any) => {
+                  let rImgs: string[] = []
+                  try { rImgs = Array.isArray(rm.images) ? rm.images : JSON.parse(rm.images || '[]') } catch { rImgs = [] }
+                  const thumb = rImgs[0] || richgateHeroThumb
+                  const bookHref = rm.id
+                    ? `/property/${escHtml(richgateProp.listing_id)}?room=${rm.id}#rooms`
+                    : `/property/${escHtml(richgateProp.listing_id)}#rooms`
+                  return `
+                  <a href="${bookHref}" class="flex items-center gap-2.5 p-2 rounded-lg border border-[#ebe6dc] bg-[#faf9f6] hover:border-[#C9A84C] hover:bg-white transition-all" style="text-decoration:none;">
+                    <img src="${escHtml(thumb)}" alt="${escHtml(rm.room_name)}" class="w-12 h-12 rounded object-cover flex-shrink-0 bg-gray-200" />
+                    <div class="min-w-0 flex-1">
+                      <p class="text-xs font-bold text-[#051C12] truncate">${escHtml(rm.room_name)}</p>
+                      <p class="text-xs font-semibold text-[#A8883A] tabular-nums">₦${Number(rm.price_per_night || 0).toLocaleString('en-NG')}/night</p>
+                    </div>
+                  </a>`
+                }).join('')}
+              </div>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-3 pt-4 border-t border-gray-100">
+              <a href="/property/${escHtml(richgateProp.listing_id)}#rooms" class="btn-primary whitespace-nowrap shrink-0">
+                View All Suites &amp; Book <i class="fas fa-arrow-right text-xs"></i>
+              </a>
+              <a href="/property/${escHtml(richgateProp.listing_id)}#bookingCard" class="px-4 py-2.5 rounded border border-[#051C12] text-[#051C12] text-xs font-bold hover:bg-[#051C12] hover:text-white transition-colors whitespace-nowrap shrink-0" style="text-decoration:none;">
+                Check Dates &amp; Rates
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>` : ''}
+
+      ${otherFeatured.length > 0 ? `
+      <div id="homeFeaturedGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+        ${otherFeatured.slice(0, 8).map(propertyCard).join('')}
+      </div>` : ''}
+    </div>
+  </section>
+  <script>
+    window.filterHomeFeatured = function(cat, btn) {
+      document.querySelectorAll('.home-feat-tab').forEach(function(b) {
+        b.className = 'home-feat-tab whitespace-nowrap shrink-0 px-4 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer bg-white text-gray-700 border border-[#dfdacf] hover:border-[#C9A84C]';
+      });
+      if (btn) {
+        btn.className = 'home-feat-tab whitespace-nowrap shrink-0 px-4 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer bg-[#051C12] text-white';
+      }
+      document.querySelectorAll('#featured-residences .prop-card-item').forEach(function(card) {
+        var c = card.getAttribute('data-cat') || '';
+        card.style.display = (cat === 'all' || c === cat) ? '' : 'none';
+      });
+    };
+  </script>
+
+  <!-- WHAT WE DO: ASYMMETRIC BENTO GRID -->
+  <section style="background:#fff; padding:80px 0 68px;">
+    <div class="max-w-7xl mx-auto px-6">
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:52px; align-items:end; margin-bottom:48px;" class="what-we-do-grid">
+        <div>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold-dark); margin-bottom:10px;">Our Core Divisions</p>
+          <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(2rem,4vw,3.1rem); line-height:1.08; color:#1a1a1a; font-weight:400; margin:0; text-wrap:balance;">${formatMultiline(settings.whatwedo_title, 'Integrated Solutions.\nEndless Possibilities.')}</h2>
+        </div>
+        <div>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; line-height:1.8; color:#555; max-width:500px; margin:0;">${escHtml(settings.whatwedo_body || 'Purecrest is a dynamic company providing end-to-end solutions in hospitality and real estate. From premium hospitality management to property development and investment advisory, we create spaces and experiences that stand the test of time.')}</p>
+        </div>
+      </div>
+
+      <!-- 12-Col Bento Services Grid -->
+      <div class="grid grid-cols-1 md:grid-cols-12 gap-5">
+        <a href="/hospitality" class="md:col-span-7 service-card group" style="text-decoration:none; display:flex; flex-direction:column;">
+          <div style="height:240px; overflow:hidden; position:relative; background:linear-gradient(135deg,var(--forest-mid),var(--forest));">
             ${serviceImg1 ? `<img src="${escHtml(serviceImg1)}" alt="Purecrest Hospitality Management Nigeria" style="width:100%; height:100%; object-fit:cover; display:block;" onerror="this.style.display='none'" />` : ''}
           </div>
-          <div style="padding:22px;">
-            <h3 style="font-family:'DM Serif Display',serif; font-size:1.15rem; color:var(--forest); margin-bottom:8px; font-weight:400; transition:color 0.2s;">${escHtml(settings.service_card_1_title || 'Purecrest Hospitality')}</h3>
-            <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.7; color:#666;">${escHtml(settings.service_card_1_desc || 'Hotel management, serviced apartments, and short-let operations delivering exceptional guest experiences and maximum owner returns.')}</p>
+          <div style="padding:26px; flex:1; display:flex; flex-direction:column; justify-content:space-between;">
+            <div>
+              <h3 style="font-family:'DM Serif Display',serif; font-size:1.35rem; color:var(--forest); margin-bottom:8px; font-weight:400;">${escHtml(settings.service_card_1_title || 'Purecrest Hospitality')}</h3>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.7; color:#5e5e5e; margin-bottom:14px;">${escHtml(settings.service_card_1_desc || 'Hotel management, serviced apartments, and short-let operations delivering exceptional guest experiences and maximum owner returns.')}</p>
+            </div>
+            <span style="display:inline-flex; align-items:center; gap:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:700; color:var(--forest);">Explore Hospitality <i class="fas fa-arrow-right" style="font-size:0.65rem;"></i></span>
           </div>
         </a>
-        <!-- Purecrest Property -->
-        <a href="/property" class="service-card" style="text-decoration:none; display:block; cursor:pointer;">
-          <div style="height:200px; overflow:hidden; position:relative; background:linear-gradient(135deg,#1a2a3a,#0B1F3A);">
+
+        <a href="/property" class="md:col-span-5 service-card group" style="text-decoration:none; display:flex; flex-direction:column;">
+          <div style="height:240px; overflow:hidden; position:relative; background:linear-gradient(135deg,#1a2a3a,#0B1F3A);">
             ${serviceImg2 ? `<img src="${escHtml(serviceImg2)}" alt="Purecrest Property Nigeria" style="width:100%; height:100%; object-fit:cover; display:block;" onerror="this.style.display='none'" />` : ''}
           </div>
-          <div style="padding:22px;">
-            <h3 style="font-family:'DM Serif Display',serif; font-size:1.15rem; color:var(--forest); margin-bottom:8px; font-weight:400; transition:color 0.2s;">${escHtml(settings.service_card_2_title || 'Purecrest Property')}</h3>
-            <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.7; color:#666;">${escHtml(settings.service_card_2_desc || 'Real estate development, property sales, leasing, and investment advisory creating lasting value across Nigeria.')}</p>
+          <div style="padding:26px; flex:1; display:flex; flex-direction:column; justify-content:space-between;">
+            <div>
+              <h3 style="font-family:'DM Serif Display',serif; font-size:1.35rem; color:var(--forest); margin-bottom:8px; font-weight:400;">${escHtml(settings.service_card_2_title || 'Purecrest Property')}</h3>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.7; color:#5e5e5e; margin-bottom:14px;">${escHtml(settings.service_card_2_desc || 'Real estate development, property sales, leasing, and investment advisory creating lasting value across Nigeria.')}</p>
+            </div>
+            <span style="display:inline-flex; align-items:center; gap:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:700; color:var(--forest);">Browse Properties <i class="fas fa-arrow-right" style="font-size:0.65rem;"></i></span>
           </div>
         </a>
-        <!-- Pure Crest Technology -->
-        <a href="/technology" class="service-card" style="text-decoration:none; display:block; cursor:pointer;">
-          <div style="height:200px; overflow:hidden; position:relative; background:linear-gradient(135deg,#0a1628,#0B1F3A);">
+
+        <a href="/technology" class="md:col-span-5 service-card group" style="text-decoration:none; display:flex; flex-direction:column;">
+          <div style="height:210px; overflow:hidden; position:relative; background:linear-gradient(135deg,#0a1628,#0B1F3A);">
             ${serviceImg3 ? `<img src="${escHtml(serviceImg3)}" alt="Pure Crest Technology" style="width:100%; height:100%; object-fit:cover; display:block;" onerror="this.style.display='none'" />` : ''}
           </div>
-          <div style="padding:22px;">
-            <h3 style="font-family:'DM Serif Display',serif; font-size:1.15rem; color:var(--forest); margin-bottom:8px; font-weight:400; transition:color 0.2s;">${escHtml(settings.service_card_3_title || 'Pure Crest Technology')}</h3>
-            <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.7; color:#666;">${escHtml(settings.service_card_3_desc || 'Web development, booking systems, and hospitality software powering modern hospitality and property businesses.')}</p>
+          <div style="padding:24px; flex:1; display:flex; flex-direction:column; justify-content:space-between;">
+            <div>
+              <h3 style="font-family:'DM Serif Display',serif; font-size:1.25rem; color:var(--forest); margin-bottom:8px; font-weight:400;">${escHtml(settings.service_card_3_title || 'Pure Crest Technology')}</h3>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.88rem; line-height:1.7; color:#5e5e5e; margin-bottom:12px;">${escHtml(settings.service_card_3_desc || 'Web development, booking systems, and hospitality software powering modern hospitality and property businesses.')}</p>
+            </div>
+            <span style="display:inline-flex; align-items:center; gap:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:700; color:var(--forest);">View Tech Solutions <i class="fas fa-arrow-right" style="font-size:0.65rem;"></i></span>
           </div>
         </a>
-      </div>
-      <!-- Second row: Virtual Support -->
-      <div style="display:grid; grid-template-columns:1fr; gap:24px;" class="services-grid-2">
-        <!-- Hospitality Virtual Support -->
-        <a href="/virtual-support" class="service-card" style="text-decoration:none; display:block; cursor:pointer; background:var(--forest);">
-          <div style="padding:32px 28px;">
-            <h3 style="font-family:'DM Serif Display',serif; font-size:1.2rem; color:#fff; margin-bottom:10px; font-weight:400; transition:color 0.2s;">${escHtml(settings.service_card_4_title || 'Hospitality Virtual Support')}</h3>
-            <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.7; color:rgba(255,255,255,0.65); margin-bottom:18px;">${escHtml(settings.service_card_4_desc || 'Professional remote management for your hospitality business — 24/7 guest support, reservations, revenue management, and operations coordination.')}</p>
-            <span style="display:inline-flex; align-items:center; gap:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:var(--gold);">Learn More <i class="fas fa-arrow-right" style="font-size:0.65rem;"></i></span>
+
+        <a href="/virtual-support" class="md:col-span-7 service-card" style="text-decoration:none; display:flex; flex-direction:column; justify-content:space-between; background:var(--forest); border-color:rgba(201,168,76,0.22);">
+          <div style="padding:32px 30px; display:flex; flex-direction:column; height:100%; justify-content:space-between;">
+            <div>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.16em; text-transform:uppercase; color:var(--gold); margin-bottom:10px;">24/7 Remote Operations</p>
+              <h3 style="font-family:'DM Serif Display',serif; font-size:1.55rem; color:#fff; margin-bottom:12px; font-weight:400;">${escHtml(settings.service_card_4_title || 'Hospitality Virtual Support')}</h3>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.92rem; line-height:1.75; color:rgba(255,255,255,0.74); margin-bottom:24px; max-width:540px;">${escHtml(settings.service_card_4_desc || 'Professional remote management for your hospitality business — 24/7 guest support, reservations, revenue management, and operations coordination.')}</p>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:14px; padding-top:18px; border-top:1px solid rgba(255,255,255,0.1);">
+              <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; color:rgba(255,255,255,0.68);">Airbnb · Booking.com · Direct Reservations</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.82rem; font-weight:700; color:var(--gold);">Learn More <i class="fas fa-arrow-right" style="font-size:0.65rem;"></i></span>
+            </div>
           </div>
         </a>
       </div>
     </div>
   </section>
   <style>
-    @media (max-width:900px) { .what-we-do-grid { grid-template-columns:1fr !important; gap:24px !important; } }
-    @media (max-width:768px) { .services-grid { grid-template-columns:1fr !important; } .services-grid-2 { grid-template-columns:1fr !important; } }
-    @media (min-width:480px) and (max-width:768px) { .services-grid { grid-template-columns:1fr 1fr !important; } }
+    @media (max-width:900px) { .what-we-do-grid { grid-template-columns:1fr !important; gap:20px !important; } }
   </style>
 
-  <!-- OTA LISTING OPTIMIZATION AD BANNER -->
-  <section style="background:#051C12; padding:0;">
-    <a href="/ota-listing" aria-label="OTA Listing Optimization — Maximize Bookings Across Every Platform" style="display:block; text-decoration:none;">
-      <img src="${escHtml(otaBannerImg)}" alt="OTA Listing Optimization — Maximize Bookings Across Every Platform" style="width:100%; height:auto; display:block;" loading="lazy" />
-    </a>
-  </section>
+  <!-- OTA LISTING OPTIMIZATION SHOWCASE (WITH OTA PLATFORM ICONS) -->
+  <section style="background:linear-gradient(135deg, #051C12 0%, #092619 55%, #0B1F3A 100%); padding:78px 0; position:relative; overflow:hidden; border-top:1px solid rgba(201,168,76,0.22); border-bottom:1px solid rgba(201,168,76,0.22);">
+    <div class="max-w-7xl mx-auto px-6">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
+        <div class="lg:col-span-6">
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold); margin-bottom:12px;">
+            OTA Channel Management &amp; Revenue
+          </p>
+          <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.9rem,3.6vw,2.9rem); line-height:1.1; color:#fff; margin:0 0 18px; font-weight:400; text-wrap:balance;">
+            Maximize Bookings Across Every OTA Platform
+          </h2>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; line-height:1.8; color:rgba(255,255,255,0.76); margin-bottom:26px; max-width:520px;">
+            We position your hotels, serviced apartments, and short-let residences to rank higher, convert faster, and eliminate double bookings across leading global travel marketplaces.
+          </p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-7 text-xs text-white/85">
+            ${[
+              ['fa-camera', 'Listing copywriting & curated photography'],
+              ['fa-sync-alt', 'Real-time multi-platform calendar sync'],
+              ['fa-tags', 'Dynamic seasonal & event rate tuning'],
+              ['fa-headset', 'Rapid Superhost-grade guest messaging'],
+            ].map(([ic, txt]) => `
+            <div class="flex items-center gap-2.5">
+              <span class="w-7 h-7 rounded-md bg-[#C9A84C]/15 text-[#C9A84C] flex items-center justify-center flex-shrink-0"><i class="fas ${ic}"></i></span>
+              <span>${txt}</span>
+            </div>`).join('')}
+          </div>
+          <div class="flex flex-wrap gap-3">
+            <a href="/ota-listing" class="btn-primary whitespace-nowrap shrink-0">Explore OTA Optimization <i class="fas fa-arrow-right text-xs"></i></a>
+            <a href="/contact?service=ota" class="btn-outline whitespace-nowrap shrink-0">Contact Us</a>
+          </div>
+        </div>
 
-  <!-- HOTEL PMS MARKETING SECTION (pchpms.com) -->
-  ${renderPmsMarketingSection(settings, 'home')}
+        <!-- OTA Platform Brand Icons Grid -->
+        <div class="lg:col-span-6">
+          <div class="grid grid-cols-2 gap-4">
+            <!-- Airbnb Card -->
+            <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:22px;">
+              <div class="flex items-center gap-3 mb-3">
+                <div style="width:42px; height:42px; border-radius:10px; background:#FF5A5F; display:flex; align-items:center; justify-content:center; flex-shrink:0;">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.5c-2.2 4-5.5 9.2-5.5 13A5.5 5.5 0 0 0 12 21a5.5 5.5 0 0 0 5.5-5.5c0-3.8-3.3-9-5.5-13z"/><circle cx="12" cy="14" r="2"/></svg>
+                </div>
+                <div>
+                  <h3 style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.98rem; font-weight:700; color:#fff; margin:0;">Airbnb</h3>
+                  <p style="font-size:0.72rem; color:rgba(255,255,255,0.62); margin:0;">Shortlets &amp; Studios</p>
+                </div>
+              </div>
+              <p style="font-size:0.8rem; line-height:1.55; color:rgba(255,255,255,0.72); margin:0;">Search-rank optimization, Superhost standards, and instant verified bookings.</p>
+            </div>
+
+            <!-- Booking.com Card -->
+            <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:22px;">
+              <div class="flex items-center gap-3 mb-3">
+                <div style="width:42px; height:42px; border-radius:10px; background:#003580; border:1px solid rgba(255,255,255,0.2); display:flex; align-items:center; justify-content:center; flex-shrink:0;">
+                  <span style="font-family:'Plus Jakarta Sans',sans-serif; font-weight:800; font-size:1.1rem; color:#fff;">B.</span>
+                </div>
+                <div>
+                  <h3 style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.98rem; font-weight:700; color:#fff; margin:0;">Booking.com</h3>
+                  <p style="font-size:0.72rem; color:rgba(255,255,255,0.62); margin:0;">Hotels &amp; Suites</p>
+                </div>
+              </div>
+              <p style="font-size:0.8rem; line-height:1.55; color:rgba(255,255,255,0.72); margin:0;">Extranet setup, room parity management, and international corporate travellers.</p>
+            </div>
+
+            <!-- Expedia Card -->
+            <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:22px;">
+              <div class="flex items-center gap-3 mb-3">
+                <div style="width:42px; height:42px; border-radius:10px; background:#FFC72C; display:flex; align-items:center; justify-content:center; flex-shrink:0;">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#00254D" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.2-1.1.7l-.3.7 6 3.5-3.3 3.3-2.5-.5-.6.6 3.2 2 2 3.2.6-.6-.5-2.5 3.3-3.3 3.5 6 .7-.3c.5-.2.8-.6.7-1.1z"/></svg>
+                </div>
+                <div>
+                  <h3 style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.98rem; font-weight:700; color:#fff; margin:0;">Expedia Group</h3>
+                  <p style="font-size:0.72rem; color:rgba(255,255,255,0.62); margin:0;">Global Packages</p>
+                </div>
+              </div>
+              <p style="font-size:0.8rem; line-height:1.55; color:rgba(255,255,255,0.72); margin:0;">Partner Central integration connecting flight-and-stay bookings across networks.</p>
+            </div>
+
+            <!-- Vrbo & Direct Channel Card -->
+            <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:22px;">
+              <div class="flex items-center gap-3 mb-3">
+                <div style="width:42px; height:42px; border-radius:10px; background:#C9A84C; display:flex; align-items:center; justify-content:center; flex-shrink:0;">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#051C12" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                </div>
+                <div>
+                  <h3 style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.98rem; font-weight:700; color:#fff; margin:0;">Vrbo &amp; Direct</h3>
+                  <p style="font-size:0.72rem; color:rgba(255,255,255,0.62); margin:0;">Multi-Channel Sync</p>
+                </div>
+              </div>
+              <p style="font-size:0.8rem; line-height:1.55; color:rgba(255,255,255,0.72); margin:0;">Seamless rate parity across Vrbo, Google Hotels, and direct commission-free bookings.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <!-- LET US MANAGE YOUR SHORTLETS OR HOTEL -->
   <section style="background:var(--cream); padding:80px 0;">
     <div class="max-w-7xl mx-auto px-6">
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:60px; align-items:center;" class="manage-grid">
-        <!-- Left: Content -->
         <div>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold); margin-bottom:16px;">PROPERTY MANAGEMENT</p>
-          <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.8rem,3.5vw,2.8rem); line-height:1.15; color:var(--forest); font-weight:400; margin-bottom:20px;">${escHtml(settings.manage_section_title || 'Let Us Manage Your Property')}</h2>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.85; color:#555; margin-bottom:28px;">${escHtml(settings.manage_section_body || 'We are an ethical brand built on transparency, integrity, and results. Whether you own a shortlet apartment, serviced residence, or a hotel — we handle everything from marketing, guest management, maintenance to revenue optimisation. Earn more while we manage for you.')}</p>
-          <div style="display:flex; flex-direction:column; gap:14px; margin-bottom:32px;">
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold-dark); margin-bottom:14px;">PROPERTY MANAGEMENT</p>
+          <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.8rem,3.5vw,2.8rem); line-height:1.14; color:var(--forest); font-weight:400; margin-bottom:18px; text-wrap:balance;">${escHtml(settings.manage_section_title || 'Let Us Manage Your Property')}</h2>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.92rem; line-height:1.85; color:#555; margin-bottom:26px;">${escHtml(settings.manage_section_body || 'We are an ethical brand built on transparency, integrity, and results. Whether you own a shortlet apartment, serviced residence, or a hotel — we handle everything from marketing, guest management, maintenance to revenue optimisation. Earn more while we manage for you.')}</p>
+          <div style="display:flex; flex-direction:column; gap:14px; margin-bottom:30px;">
             ${[
               {icon:'fa-shield-alt', text:'Transparent & ethical management — full accountability at every step'},
               {icon:'fa-chart-line', text:'Maximised returns through dynamic pricing and marketing strategies'},
@@ -3040,23 +3706,22 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
               {icon:'fa-star', text:'5-star guest experiences that drive reviews and repeat stays'},
             ].map(f => `
               <div style="display:flex; align-items:flex-start; gap:14px;">
-                <div style="width:36px; height:36px; border-radius:50%; background:rgba(5,28,18,0.07); display:flex; align-items:center; justify-content:center; flex-shrink:0; margin-top:2px;">
-                  <i class="fas ${f.icon}" style="color:var(--gold); font-size:0.85rem;"></i>
+                <div style="width:34px; height:34px; border-radius:8px; background:rgba(5,28,18,0.07); display:flex; align-items:center; justify-content:center; flex-shrink:0; margin-top:2px;">
+                  <i class="fas ${f.icon}" style="color:var(--gold-dark); font-size:0.85rem;"></i>
                 </div>
                 <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#444; line-height:1.65; margin:0;">${f.text}</p>
               </div>
             `).join('')}
           </div>
           <div style="display:flex; gap:14px; flex-wrap:wrap;">
-            <a href="/hospitality" class="btn-primary">Get Started <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
-            <a href="/contact" class="btn-outline" style="background:transparent; border-color:var(--forest); color:var(--forest);" onmouseover="this.style.background='var(--forest)'; this.style.color='#fff';" onmouseout="this.style.background='transparent'; this.style.color='var(--forest)';">Talk to Us</a>
+            <a href="/hospitality" class="btn-primary whitespace-nowrap shrink-0">Get Started <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
+            <a href="/contact" class="btn-outline whitespace-nowrap shrink-0" style="background:transparent; border-color:var(--forest); color:var(--forest);" onmouseover="this.style.background='var(--forest)'; this.style.color='#fff';" onmouseout="this.style.background='transparent'; this.style.color='var(--forest)';">Talk to Us</a>
           </div>
         </div>
-        <!-- Right: Highlights / CTA -->
         <div style="background:var(--forest); border-radius:16px; padding:40px 36px; color:#fff;">
           <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.15em; text-transform:uppercase; color:var(--gold); margin-bottom:12px;">OUR PROMISE TO YOU</p>
-          <h3 style="font-family:'DM Serif Display',serif; font-size:1.45rem; color:#fff; margin-bottom:16px; font-weight:400; line-height:1.3;">Ethical Management.<br/>Maximum Returns.</h3>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:rgba(255,255,255,0.65); margin-bottom:28px; line-height:1.7;">We are a people-first company built on transparency. Your property, your income — our expertise at every step.</p>
+          <h3 style="font-family:'DM Serif Display',serif; font-size:1.5rem; color:#fff; margin-bottom:14px; font-weight:400; line-height:1.3;">Ethical Management.<br/>Maximum Returns.</h3>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:rgba(255,255,255,0.68); margin-bottom:26px; line-height:1.7;">We are a people-first company built on transparency. Your property, your income — our expertise at every step.</p>
           <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:28px;">
             ${[
               'Full transparency — detailed monthly reports',
@@ -3065,10 +3730,8 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
               'Multi-platform OTA listing & management',
             ].map(item => `
               <div style="display:flex; align-items:center; gap:10px;">
-                <div style="width:20px; height:20px; border-radius:50%; background:rgba(201,168,76,0.2); display:flex; align-items:center; justify-content:center; flex-shrink:0;">
-                  <i class="fas fa-check" style="color:var(--gold); font-size:0.6rem;"></i>
-                </div>
-                <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.82rem; color:rgba(255,255,255,0.8);">${item}</span>
+                <i class="fas fa-check" style="color:var(--gold); font-size:0.75rem; flex-shrink:0;"></i>
+                <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.84rem; color:rgba(255,255,255,0.84);">${item}</span>
               </div>
             `).join('')}
           </div>
@@ -3083,28 +3746,183 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
     @media (max-width:900px) { .manage-grid { grid-template-columns:1fr !important; gap:32px !important; } }
   </style>
 
+  <!-- LET US HELP YOU FIND YOUR NEXT PROPERTY -->
+  <section id="find-next-property" style="background:#fff; padding:80px 0; border-top:1px solid #ebe7df; border-bottom:1px solid #ebe7df;">
+    <div class="max-w-7xl mx-auto px-6">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+        <div class="lg:col-span-5">
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold-dark); margin-bottom:12px;">
+            Bespoke Property Concierge
+          </p>
+          <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.9rem,3.6vw,2.85rem); line-height:1.12; color:var(--forest); font-weight:400; margin:0 0 18px; text-wrap:balance;">
+            Let Us Help You Find Your Next Property
+          </h2>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; line-height:1.8; color:#555; margin-bottom:28px;">
+            Tell our property advisory team what you are looking for — whether a residence to buy, a corporate lease, verified investment land, or an executive shortlet in Enugu, Abuja, or Lagos.
+          </p>
+          <div class="space-y-4 border-t border-gray-100 pt-6">
+            ${[
+              ['01', 'Verified Titles & Inspection', 'Every shortlisted property passes ownership and physical verification.'],
+              ['02', 'Off-Market Inventory Access', 'Early access to newly built residences and prime commercial plots.'],
+              ['03', 'Dedicated Viewing Support', 'Scheduled physical or live virtual tours tailored to your timetable.'],
+            ].map(([num, title, desc]) => `
+            <div class="flex items-start gap-3">
+              <span class="text-xs font-bold text-[#A8883A] pt-0.5 tabular-nums">${num}.</span>
+              <div>
+                <p class="text-sm font-bold text-[#051C12] m-0">${title}</p>
+                <p class="text-xs text-gray-500 mt-0.5 leading-relaxed">${desc}</p>
+              </div>
+            </div>`).join('')}
+          </div>
+          <div class="mt-6">
+            <a href="/find-my-home" class="text-xs font-bold text-[#051C12] hover:text-[#A8883A] inline-flex items-center gap-1.5" style="text-decoration:none;">
+              Prefer the detailed property brief form? Open full form <i class="fas fa-arrow-right text-[10px]"></i>
+            </a>
+          </div>
+        </div>
+
+        <div class="lg:col-span-7">
+          <div style="background:#FAF8F4; border:1px solid #e3ddd0; border-radius:16px; padding:28px 26px;">
+            <form id="homePropertyFinderForm" class="space-y-4">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label class="block text-xs font-semibold text-gray-700 mb-1">Looking To</label>
+                  <select id="hfReqType" class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C]">
+                    <option value="buy">Buy a Property</option>
+                    <option value="rent">Rent / Lease</option>
+                    <option value="short-let">Book Short-Let / Serviced Apt</option>
+                    <option value="land">Acquire Investment Land</option>
+                    <option value="commercial">Commercial Space</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-gray-700 mb-1">Property Type</label>
+                  <select id="hfPropType" class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C]">
+                    <option value="Apartment">Apartment / Flat</option>
+                    <option value="Serviced Studio">Serviced Studio / Suite</option>
+                    <option value="Duplex">Duplex / Terrace</option>
+                    <option value="Detached House">Detached House / Villa</option>
+                    <option value="Land">Land / Plot</option>
+                    <option value="Commercial">Commercial / Office</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-gray-700 mb-1">Preferred City</label>
+                  <select id="hfCity" class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C]">
+                    <option value="Enugu">Enugu (Independence Layout, GRA)</option>
+                    <option value="Abuja">Abuja (Maitama, Wuse II, Asokoro)</option>
+                    <option value="Lagos">Lagos (Ikoyi, VI, Lekki)</option>
+                    <option value="Other Nigeria">Other Nigerian City</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-gray-700 mb-1">Bedrooms / Size</label>
+                  <select id="hfBeds" class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C]">
+                    <option value="Any">Any Size / Studio</option>
+                    <option value="1">1 Bedroom</option>
+                    <option value="2">2 Bedrooms</option>
+                    <option value="3">3 Bedrooms</option>
+                    <option value="4+">4+ Bedrooms</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-gray-700 mb-1">Your Full Name <span class="text-red-500">*</span></label>
+                  <input type="text" id="hfName" required placeholder="e.g. Chinedu Okafor" class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C]" />
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-gray-700 mb-1">Phone / WhatsApp <span class="text-red-500">*</span></label>
+                  <input type="tel" id="hfPhone" required placeholder="e.g. +234 803 000 0000" class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C]" />
+                </div>
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-gray-700 mb-1">Target Budget &amp; Neighbourhood Preferences</label>
+                <textarea id="hfDetails" rows="2" placeholder="Share preferred district, target budget range in ₦, or move-in timeline..." class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C] resize-none"></textarea>
+              </div>
+              <div id="hfError" class="hidden text-xs px-3 py-2 rounded-lg bg-red-50 text-red-700 border border-red-200 font-medium"></div>
+              <div class="flex flex-wrap items-center justify-between gap-3 pt-1">
+                <span class="text-xs text-gray-500">Response within 2 business hours</span>
+                <button type="submit" id="hfSubmitBtn" class="btn-primary whitespace-nowrap shrink-0" style="border:none; cursor:pointer;">
+                  Request Property Match <i class="fas fa-arrow-right text-xs"></i>
+                </button>
+              </div>
+            </form>
+
+            <div id="hfSuccess" class="hidden text-center py-8 space-y-3">
+              <div class="w-12 h-12 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center mx-auto">
+                <i class="fas fa-check-circle text-2xl"></i>
+              </div>
+              <h3 style="font-family:'DM Serif Display',serif; font-size:1.5rem; color:var(--forest); margin:0;">Property Brief Received</h3>
+              <p class="text-sm text-gray-600 max-w-md mx-auto">Our advisory team will curate matching listings and reach out on your phone or WhatsApp shortly.</p>
+              <button type="button" onclick="resetHomeFinder()" class="px-4 py-2 rounded-lg border border-gray-300 text-xs font-semibold text-gray-700 hover:bg-white cursor-pointer">Submit Another Request</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <script>
+    (function() {
+      var form = document.getElementById('homePropertyFinderForm');
+      var okBox = document.getElementById('hfSuccess');
+      var errBox = document.getElementById('hfError');
+      if (form) {
+        form.addEventListener('submit', async function(e) {
+          e.preventDefault();
+          if (errBox) errBox.classList.add('hidden');
+          var btn = document.getElementById('hfSubmitBtn');
+          var orig = btn ? btn.innerHTML : '';
+          if (btn) { btn.disabled = true; btn.textContent = 'Submitting...'; }
+          try {
+            var res = await fetch('/api/property-requests', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                full_name: document.getElementById('hfName').value.trim(),
+                phone: document.getElementById('hfPhone').value.trim(),
+                request_type: document.getElementById('hfReqType').value,
+                property_type: document.getElementById('hfPropType').value,
+                city: document.getElementById('hfCity').value,
+                bedrooms: document.getElementById('hfBeds').value,
+                additional_details: document.getElementById('hfDetails').value.trim(),
+                source: 'homepage-finder'
+              })
+            });
+            var data = await res.json();
+            if (data.success) {
+              form.classList.add('hidden');
+              if (okBox) okBox.classList.remove('hidden');
+            } else {
+              if (errBox) { errBox.textContent = data.error || 'Could not submit request.'; errBox.classList.remove('hidden'); }
+            }
+          } catch (_) {
+            if (errBox) { errBox.textContent = 'Network error. Please try again.'; errBox.classList.remove('hidden'); }
+          }
+          if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+        });
+      }
+      window.resetHomeFinder = function() {
+        if (form) { form.reset(); form.classList.remove('hidden'); }
+        if (okBox) okBox.classList.add('hidden');
+      };
+    })();
+  </script>
 
   <!-- HOSPITALITY TRAINING BANNER -->
   <section style="background:linear-gradient(135deg, #0B1F3A 0%, #051C12 55%, #0A2D1A 100%); padding:80px 0; position:relative; overflow:hidden;">
     <div style="position:absolute;inset:0;opacity:0.07;background-image:radial-gradient(circle at 20% 50%, rgba(201,168,76,0.6) 0%, transparent 60%),radial-gradient(circle at 80% 20%, rgba(201,168,76,0.4) 0%, transparent 50%);pointer-events:none;"></div>
-    <div style="position:absolute;right:-60px;top:-60px;width:320px;height:320px;border-radius:50%;border:1px solid rgba(201,168,76,0.12);pointer-events:none;"></div>
-    <div style="position:absolute;right:60px;top:60px;width:200px;height:200px;border-radius:50%;border:1px solid rgba(201,168,76,0.08);pointer-events:none;"></div>
     <div class="max-w-7xl mx-auto px-6" style="position:relative;z-index:2;">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:64px;align-items:center;" class="training-grid">
-        <!-- Left: Text -->
         <div>
-          <div style="display:inline-flex;align-items:center;gap:8px;background:rgba(201,168,76,0.12);border:1px solid rgba(201,168,76,0.3);border-radius:24px;padding:6px 16px;margin-bottom:24px;">
-            <i class="fas fa-graduation-cap" style="color:var(--gold);font-size:0.75rem;"></i>
-            <span style="font-family:'Plus Jakarta Sans',sans-serif;font-size:0.72rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);">Hospitality Training</span>
-          </div>
-          <h2 style="font-family:'DM Serif Display',serif;font-size:clamp(2rem,4vw,3rem);line-height:1.1;color:#fff;font-weight:400;margin-bottom:20px;">${formatMultiline(settings.training_banner_title, 'Elevate Your Team with\nProfessional Training')}</h2>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif;font-size:0.95rem;line-height:1.8;color:rgba(255,255,255,0.72);margin-bottom:32px;max-width:480px;">${escHtml(settings.training_banner_body || 'Purecrest delivers hands-on hospitality training programmes for hotels, serviced apartments, and hospitality businesses — building exceptional service cultures from the front desk to leadership.')}</p>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif;font-size:0.72rem;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);margin-bottom:14px;">
+            <i class="fas fa-graduation-cap mr-1.5"></i> Hospitality Training
+          </p>
+          <h2 style="font-family:'DM Serif Display',serif;font-size:clamp(2rem,4vw,3rem);line-height:1.1;color:#fff;font-weight:400;margin-bottom:20px;text-wrap:balance;">${formatMultiline(settings.training_banner_title, 'Elevate Your Team with\nProfessional Training')}</h2>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif;font-size:0.95rem;line-height:1.8;color:rgba(255,255,255,0.74);margin-bottom:32px;max-width:480px;">${escHtml(settings.training_banner_body || 'Purecrest delivers hands-on hospitality training programmes for hotels, serviced apartments, and hospitality businesses — building exceptional service cultures from the front desk to leadership.')}</p>
           <div style="display:flex;gap:14px;flex-wrap:wrap;">
-            <a href="/training" style="display:inline-flex;align-items:center;gap:8px;padding:14px 28px;background:var(--gold);color:#1a1a1a;border-radius:6px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;font-weight:700;text-decoration:none;transition:opacity 0.2s;" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">Explore Training <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
-            <a href="/contact?service=training" style="display:inline-flex;align-items:center;gap:8px;padding:14px 28px;background:transparent;color:rgba(255,255,255,0.85);border:1.5px solid rgba(255,255,255,0.3);border-radius:6px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;font-weight:600;text-decoration:none;transition:all 0.2s;" onmouseover="this.style.borderColor='rgba(255,255,255,0.7)';this.style.color='#fff'" onmouseout="this.style.borderColor='rgba(255,255,255,0.3)';this.style.color='rgba(255,255,255,0.85)'">Request a Session</a>
+            <a href="/training" class="whitespace-nowrap shrink-0" style="display:inline-flex;align-items:center;gap:8px;padding:13px 26px;background:var(--gold);color:#1a1a1a;border-radius:6px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;font-weight:700;text-decoration:none;">Explore Training <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
+            <a href="/contact?service=training" class="whitespace-nowrap shrink-0" style="display:inline-flex;align-items:center;gap:8px;padding:13px 26px;background:transparent;color:rgba(255,255,255,0.88);border:1.5px solid rgba(255,255,255,0.3);border-radius:6px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;font-weight:600;text-decoration:none;">Request a Session</a>
           </div>
         </div>
-        <!-- Right: Course cards -->
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
           ${[
             {icon:'fa-medal',title:'Ethical Leadership',desc:'Values-driven leadership, decision-making ethics, and building trust within hospitality teams.'},
@@ -3112,12 +3930,12 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
             {icon:'fa-users-cog',title:'Team & Operations',desc:'Staff management, SOPs, shift coordination, and operational efficiency for hospitality businesses.'},
             {icon:'fa-star',title:'Guest Experience Design',desc:'Creating memorable stays through service touchpoints, personalisation, and quality assurance.'},
           ].map(c=>`
-          <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:14px;padding:22px 18px;transition:all 0.2s;cursor:default;" onmouseover="this.style.background='rgba(201,168,76,0.1)';this.style.borderColor='rgba(201,168,76,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.06)';this.style.borderColor='rgba(255,255,255,0.1)'">
-            <div style="width:38px;height:38px;border-radius:10px;background:rgba(201,168,76,0.15);display:flex;align-items:center;justify-content:center;margin-bottom:14px;">
+          <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:22px 18px;">
+            <div style="width:36px;height:36px;border-radius:8px;background:rgba(201,168,76,0.16);display:flex;align-items:center;justify-content:center;margin-bottom:14px;">
               <i class="fas ${c.icon}" style="color:var(--gold);font-size:0.9rem;"></i>
             </div>
-            <h4 style="font-family:'DM Serif Display',serif;font-size:0.95rem;color:#fff;margin-bottom:8px;font-weight:400;line-height:1.3;">${c.title}</h4>
-            <p style="font-family:'Plus Jakarta Sans',sans-serif;font-size:0.78rem;color:rgba(255,255,255,0.6);line-height:1.6;margin:0;">${c.desc}</p>
+            <h4 style="font-family:'DM Serif Display',serif;font-size:0.98rem;color:#fff;margin-bottom:8px;font-weight:400;line-height:1.3;">${c.title}</h4>
+            <p style="font-family:'Plus Jakarta Sans',sans-serif;font-size:0.78rem;color:rgba(255,255,255,0.65);line-height:1.6;margin:0;">${c.desc}</p>
           </div>`).join('')}
         </div>
       </div>
@@ -3125,30 +3943,13 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
   </section>
   <style>@media(max-width:900px){.training-grid{grid-template-columns:1fr !important;gap:40px !important;}}</style>
 
-  <!-- FEATURED PROPERTIES -->
-  ${featured.length > 0 ? `
-  <section style="background:#F2F0EB; padding:80px 0;">
-    <div class="max-w-7xl mx-auto px-6">
-      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:40px;">
-        <div>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold); margin-bottom:10px;">Handpicked For You</p>
-          <h2 style="font-family:'DM Serif Display',serif; font-size:2rem; color:var(--forest); margin:0; font-weight:400;">Featured Properties in Nigeria</h2>
-        </div>
-        <a href="/properties" style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; font-weight:600; color:var(--forest); text-decoration:none; display:flex; align-items:center; gap:6px;" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--forest)'">View All <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
-      </div>
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-        ${featured.map(propertyCard).join('')}
-      </div>
-    </div>
-  </section>` : ''}
-
   <!-- RECENT BLOG POSTS -->
   ${recentPosts.length > 0 ? `
   <section style="background:#fff; padding:80px 0;">
     <div class="max-w-7xl mx-auto px-6">
-      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:48px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:44px; flex-wrap:wrap; gap:12px;">
         <div>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold); margin-bottom:10px;">OUR BLOG</p>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold-dark); margin-bottom:8px;">OUR BLOG</p>
           <h2 style="font-family:'DM Serif Display',serif; font-size:2rem; color:var(--forest); margin:0; font-weight:400;">Latest from Purecrest</h2>
         </div>
         <a href="/blog" style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; font-weight:600; color:var(--forest); text-decoration:none; display:flex; align-items:center; gap:6px;" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='var(--forest)'">View All Posts <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
@@ -3159,15 +3960,14 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
           return `
           <a href="/blog/${post.slug}" style="text-decoration:none; background:#F9F9F7; border-radius:12px; overflow:hidden; border:1px solid #e8e8e4; display:block; transition:transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-4px)'; this.style.boxShadow='0 12px 32px rgba(0,0,0,0.1)'" onmouseout="this.style.transform='none'; this.style.boxShadow='none'">
             <div style="height:200px; overflow:hidden; background:linear-gradient(135deg,var(--forest-mid),var(--forest));">
-              ${post.cover_image ? `<img src="${post.cover_image}" alt="${post.title}" style="width:100%; height:100%; object-fit:cover;" onerror="this.style.display='none'" />` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;"><i class="fas fa-newspaper" style="font-size:2.5rem;color:rgba(201,168,76,0.4);"></i></div>`}
+              ${post.cover_image ? `<img src="${escHtml(post.cover_image)}" alt="${escHtml(post.title)}" style="width:100%; height:100%; object-fit:cover;" onerror="this.style.display='none'" />` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;"><i class="fas fa-newspaper" style="font-size:2.5rem;color:rgba(201,168,76,0.4);"></i></div>`}
             </div>
             <div style="padding:24px;">
-              <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
-                <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:var(--gold);">${post.category || 'Insights'}</span>
-                ${postDate ? `<span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; color:#aaa;">· ${postDate}</span>` : ''}
-              </div>
-              <h3 style="font-family:'DM Serif Display',serif; font-size:1.1rem; color:var(--forest); margin-bottom:10px; font-weight:400; line-height:1.4;">${post.title}</h3>
-              ${post.excerpt ? `<p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.85rem; line-height:1.65; color:#777; display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${post.excerpt}</p>` : ''}
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:var(--gold-dark); margin-bottom:10px;">
+                ${escHtml(post.category || 'Insights')}${postDate ? `<span style="font-weight:500; color:#8a8a85; text-transform:none; letter-spacing:0;"> · ${postDate}</span>` : ''}
+              </p>
+              <h3 style="font-family:'DM Serif Display',serif; font-size:1.15rem; color:var(--forest); margin-bottom:10px; font-weight:400; line-height:1.38;">${escHtml(post.title)}</h3>
+              ${post.excerpt ? `<p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.85rem; line-height:1.65; color:#666; display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escHtml(post.excerpt)}</p>` : ''}
               <div style="display:flex; align-items:center; gap:6px; margin-top:16px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:var(--forest);">
                 Read More <i class="fas fa-arrow-right" style="font-size:0.65rem;"></i>
               </div>
@@ -3183,13 +3983,13 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
   </style>` : ''}
 
   <!-- CTA STRIP -->
-  <section style="background:var(--navy); padding:60px 0;">
+  <section style="background:var(--navy); padding:64px 0;">
     <div class="max-w-5xl mx-auto px-6" style="display:flex; flex-direction:column; align-items:center; text-align:center; gap:20px;">
       <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold);">Ready to get started?</p>
-      <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.5rem,3vw,2.25rem); color:#fff; margin:0; font-weight:400; max-width:620px;">${escHtml(settings.home_cta_title || 'Whether you need property management, OTA optimization, virtual support or real estate services — we are here to help.')}</h2>
+      <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.5rem,3vw,2.25rem); color:#fff; margin:0; font-weight:400; max-width:640px; text-wrap:balance;">${escHtml(settings.home_cta_title || 'Whether you need property management, OTA optimization, virtual support or real estate services — we are here to help.')}</h2>
       <div style="display:flex; gap:14px; flex-wrap:wrap; justify-content:center;">
-        <a href="/contact" class="btn-primary">${escHtml(settings.home_cta_btn_text || 'Get in Touch')} <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
-        <a href="/hospitality" class="btn-outline">Explore Hospitality</a>
+        <a href="/contact" class="btn-primary whitespace-nowrap shrink-0">${escHtml(settings.home_cta_btn_text || 'Get in Touch')} <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
+        <a href="/hospitality" class="btn-outline whitespace-nowrap shrink-0">Explore Hospitality</a>
       </div>
     </div>
   </section>
@@ -3205,6 +4005,7 @@ function propertiesPage(properties: any[], total: number, page: number, limit: n
   const pages = Math.ceil(total / limit)
   const lagosAreas = ['Victoria Island', 'Lekki', 'Ikoyi', 'Ajah', 'Yaba', 'Surulere', 'Ikeja', 'Lagos Island', 'Apapa', 'Maryland', 'Gbagada', 'Magodo', 'Lekki Phase 1', 'Sangotedo', 'Isale Eko', 'Oniru']
   const abujaAreas = ['Maitama', 'Wuse 2', 'Asokoro', 'Jabi', 'Garki', 'Utako', 'Guzape', 'Lugbe', 'Kubwa', 'Kado', 'Apo', 'Gwarinpa', 'Katampe', 'Lokogoma', 'Kuje', 'Dawaki']
+  const enuguAreas = ['Independence Layout', 'New Haven', 'GRA Enugu', 'Trans-Ekulu', 'Achara Layout']
 
   const content = `
   <!-- PROPERTIES HERO: Split Layout (image right, text left) -->
@@ -3217,7 +4018,7 @@ function propertiesPage(properties: any[], total: number, page: number, limit: n
             <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold); margin:0;">Premium Properties</p>
           </div>
           <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(2rem,4vw,3.2rem); line-height:1.1; color:#fff; margin-bottom:16px; font-weight:400;">Find Your Perfect<br/><em style="color:var(--gold); font-style:normal;">Property in Nigeria</em></h1>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; line-height:1.75; color:rgba(255,255,255,0.72); margin-bottom:28px; max-width:440px;">Browse premium properties for sale, rent, and short let across Lagos, Abuja, and Nigeria. Your dream home awaits.</p>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; line-height:1.75; color:rgba(255,255,255,0.72); margin-bottom:28px; max-width:440px;">Browse premium properties for sale, rent, and short let across Lagos, Abuja, Enugu, and Nigeria. Your dream home awaits.</p>
 
         </div>
         <!-- Right: Image -->
@@ -3266,6 +4067,9 @@ function propertiesPage(properties: any[], total: number, page: number, limit: n
             <label style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.68rem; font-weight:700; color:#666; text-transform:uppercase; letter-spacing:0.06em;">Area</label>
             <select name="area" style="width:100%; padding:11px 14px; border:1.5px solid #e2e8f0; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; color:#1a1a1a;">
               <option value="">All Areas</option>
+              <optgroup label="— Enugu —">
+                ${enuguAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
+              </optgroup>
               <optgroup label="— Lagos —">
                 ${lagosAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
               </optgroup>
@@ -3435,6 +4239,7 @@ function listingsPage(properties: any[], total: number, page: number, limit: num
   const pages = Math.ceil(total / limit)
   const lagosAreas = ['Victoria Island', 'Lekki', 'Ikoyi', 'Ajah', 'Yaba', 'Surulere', 'Ikeja', 'Lagos Island', 'Apapa', 'Maryland', 'Gbagada', 'Magodo', 'Lekki Phase 1', 'Sangotedo']
   const abujaAreas = ['Maitama', 'Wuse 2', 'Asokoro', 'Jabi', 'Garki', 'Utako', 'Guzape', 'Lugbe', 'Kubwa', 'Kado', 'Apo', 'Gwarinpa', 'Katampe', 'Lokogoma', 'Kuje']
+  const enuguAreas = ['Independence Layout', 'New Haven', 'GRA Enugu', 'Trans-Ekulu', 'Achara Layout']
 
   const categoryLabels: Record<string, string> = {
     'buy': 'For Sale', 'rent': 'For Rent', 'short-let': 'Short Let', 'land': 'Land', 'commercial': 'Commercial'
@@ -3446,7 +4251,7 @@ function listingsPage(properties: any[], total: number, page: number, limit: num
     <div class="max-w-7xl mx-auto px-4 md:px-6 text-center">
       <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold); margin-bottom:12px;">All Listings</p>
       <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(1.8rem,4vw,2.8rem); color:#fff; font-weight:400; margin-bottom:12px;">Property Listings in Nigeria</h1>
-      <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; color:rgba(255,255,255,0.72); max-width:520px; margin:0 auto 32px;">Discover our full range of properties — apartments, houses, land and commercial spaces available across Nigeria.</p>
+      <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; color:rgba(255,255,255,0.72); max-width:520px; margin:0 auto 32px;">Discover our full range of properties — apartments, houses, land and commercial spaces available across Lagos, Abuja, and Enugu.</p>
 
       <!-- FULL WIDTH SEARCH -->
       <form method="GET" action="/listings" style="background:#fff; border-radius:12px; padding:18px 20px; max-width:860px; margin:0 auto; box-shadow:0 8px 32px rgba(0,0,0,0.25);">
@@ -3470,6 +4275,9 @@ function listingsPage(properties: any[], total: number, page: number, limit: num
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; color:#555; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:4px;">Area</label>
             <select name="area" style="width:100%; padding:10px 14px; border:1.5px solid #e2e8f0; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; color:#1a1a1a;">
               <option value="">All Areas</option>
+              <optgroup label="— Enugu —">
+                ${enuguAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
+              </optgroup>
               <optgroup label="— Lagos —">
                 ${lagosAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
               </optgroup>
@@ -3577,6 +4385,7 @@ function shortletsPage(properties: any[], total: number, page: number, limit: nu
   const pages = Math.ceil(total / limit)
   const lagosAreas = ['Victoria Island', 'Lekki', 'Ikoyi', 'Ajah', 'Yaba', 'Surulere', 'Ikeja', 'Lagos Island', 'Apapa', 'Maryland', 'Gbagada', 'Magodo', 'Lekki Phase 1', 'Sangotedo']
   const abujaAreas = ['Maitama', 'Wuse 2', 'Asokoro', 'Jabi', 'Garki', 'Utako', 'Guzape', 'Kubwa', 'Kado', 'Apo', 'Gwarinpa', 'Katampe', 'Lugbe', 'Kuje']
+  const enuguAreas = ['Independence Layout', 'New Haven', 'GRA Enugu', 'Trans-Ekulu', 'Achara Layout']
   const today = new Date().toISOString().split('T')[0]
   const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0]
 
@@ -3590,7 +4399,7 @@ function shortletsPage(properties: any[], total: number, page: number, limit: nu
       <!-- Heading -->
       <div style="text-align:center; margin-bottom:36px; position:relative; z-index:2;">
         <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(2rem,5vw,3.4rem); color:#fff; font-weight:400; margin:0 0 14px; line-height:1.1;">Short Let Apartments<br/><em style="color:var(--gold); font-style:normal;">in Nigeria</em></h1>
-        <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; color:rgba(255,255,255,0.7); max-width:440px; margin:0 auto; line-height:1.75;">Fully furnished apartments for nightly, weekly &amp; monthly stays across Lagos and Abuja.</p>
+        <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; color:rgba(255,255,255,0.7); max-width:480px; margin:0 auto; line-height:1.75;">Fully furnished apartments and suites for nightly, weekly &amp; monthly stays across Enugu, Abuja, and Lagos.</p>
       </div>
 
       <!-- SEARCH FORM CARD -->
@@ -3624,6 +4433,9 @@ function shortletsPage(properties: any[], total: number, page: number, limit: nu
               <select name="area" style="width:100%; padding:10px 12px; border:1.5px solid #e2e8f0; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; color:#1a1a1a; background:#fafafa; outline:none; box-sizing:border-box;"
                 onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'">
                 <option value="">Any Area in Nigeria</option>
+                <optgroup label="── Enugu ──">
+                  ${enuguAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
+                </optgroup>
                 <optgroup label="── Lagos ──">
                   ${lagosAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
                 </optgroup>
@@ -3806,6 +4618,37 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
   const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0]
   const pageUrl = `https://purecrest.ng/property/${prop.listing_id}`
   const pageTitle = encodeURIComponent(prop.title)
+
+  const parsedRooms = (rooms || []).map((rm: any) => {
+    let rmImgs: string[] = []
+    let rmAmenities: string[] = []
+    try { rmImgs = JSON.parse(rm.images || '[]').filter(Boolean) } catch { rmImgs = [] }
+    try { rmAmenities = JSON.parse(rm.amenities || '[]').filter(Boolean) } catch { rmAmenities = [] }
+    return {
+      id: Number(rm.id),
+      room_name: rm.room_name || 'Suite',
+      room_type: rm.room_type || 'Room',
+      description: rm.description || '',
+      price_per_night: Number(rm.price_per_night || 0) || Number(prop.price_per_night || prop.price || 0),
+      max_guests: Number(rm.max_guests || 2),
+      bedrooms: Number(rm.bedrooms || 1),
+      bathrooms: Number(rm.bathrooms || 1),
+      amenities: rmAmenities,
+      images: rmImgs.length > 0 ? rmImgs : (imgs[0] ? [imgs[0]] : []),
+      raw_images: rmImgs,
+    }
+  })
+
+  const allRoomGalleryPhotos: Array<{ roomId: number; roomName: string; price: number; url: string }> = []
+  for (const rm of parsedRooms) {
+    for (const u of rm.raw_images) {
+      allRoomGalleryPhotos.push({ roomId: rm.id, roomName: rm.room_name, price: rm.price_per_night, url: u })
+    }
+  }
+  const parsedRoomsJson = JSON.stringify(parsedRooms).replace(/</g, '\\u003c')
+  const allRoomPhotosJson = JSON.stringify(allRoomGalleryPhotos).replace(/</g, '\\u003c')
+  const defaultRoom = parsedRooms[0] || null
+  const initialNightlyRate = defaultRoom ? defaultRoom.price_per_night : Number(prop.price_per_night || prop.price || 0)
 
   // Build gallery: images + videos mixed
   // Determine video type (youtube/vimeo/upload) for each video
@@ -3995,44 +4838,155 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
         </div>` : ''}
 
         <!-- Short-let Rooms & Units -->
-        ${isShortLet && rooms.length > 0 ? `
-        <div class="bg-white rounded-2xl p-4 sm:p-6 shadow-sm mb-4 sm:mb-6">
+        ${isShortLet && parsedRooms.length > 0 ? `
+        <div id="rooms" class="bg-white rounded-2xl p-4 sm:p-6 shadow-sm mb-4 sm:mb-6 border border-[#ece8df]">
           <div class="flex items-center justify-between gap-3 mb-4 flex-wrap">
             <div>
-              <h2 class="banner-h2 text-lg font-bold text-gray-800">Available Rooms &amp; Suites</h2>
-              <p class="text-xs text-gray-500 mt-0.5">${rooms.length} unit${rooms.length > 1 ? 's' : ''} available at this property</p>
+              <p class="text-[11px] font-bold uppercase tracking-widest text-[#A8883A] mb-0.5">Room Types &amp; Suites</p>
+              <h2 class="banner-h2 text-xl font-bold text-[#051C12]">Choose Your Room &amp; Book</h2>
+              <p class="text-xs text-gray-500 mt-0.5">${parsedRooms.length} suite type${parsedRooms.length > 1 ? 's' : ''} available — inspect room photos and select a room to book</p>
             </div>
+            ${allRoomGalleryPhotos.length > 0 ? `
+            <button type="button" onclick="openRoomLightbox(0)" class="whitespace-nowrap shrink-0 px-3.5 py-2 rounded-lg border border-[#dfd9cc] bg-[#faf9f6] hover:border-[#C9A84C] text-xs font-semibold text-[#051C12] cursor-pointer">
+              <i class="fas fa-images text-[#C9A84C] mr-1.5"></i>View All ${allRoomGalleryPhotos.length} Room Photos
+            </button>` : ''}
           </div>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            ${rooms.map((rm: any) => {
-              let rmImgs: string[] = []
-              try { rmImgs = JSON.parse(rm.images || '[]').filter(Boolean) } catch { rmImgs = [] }
-              let rmAmenities: string[] = []
-              try { rmAmenities = JSON.parse(rm.amenities || '[]').filter(Boolean) } catch { rmAmenities = [] }
-              const cover = rmImgs[0] || imgs[0] || ''
-              const rate = Number(rm.price_per_night || 0)
+
+          ${allRoomGalleryPhotos.length > 0 ? `
+          <!-- All Room Photos Strip -->
+          <div class="mb-5 pb-5 border-b border-gray-100">
+            <p class="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-2">Uploaded Room Gallery</p>
+            <div class="grid grid-cols-3 sm:grid-cols-6 gap-2">
+              ${allRoomGalleryPhotos.slice(0, 6).map((p, idx) => `
+              <button type="button" onclick="openRoomLightbox(${idx})" class="group relative rounded-lg overflow-hidden border border-gray-200 bg-gray-100 cursor-pointer text-left" style="height:68px;">
+                <img src="${escHtml(p.url)}" alt="${escHtml(p.roomName)}" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" loading="lazy" />
+                <div class="absolute inset-x-0 bottom-0 bg-black/65 px-1.5 py-0.5 text-[10px] text-white truncate">${escHtml(p.roomName)}</div>
+              </button>`).join('')}
+            </div>
+          </div>` : ''}
+
+          ${(() => {
+            const renderRoomCardHtml = (rm: any, rIdx: number) => {
+              const rmImgs = rm.images
+              const cover = rmImgs[0] || ''
+              const firstLbIdx = Math.max(0, allRoomGalleryPhotos.findIndex((p) => p.roomId === rm.id))
               return `
-              <div class="border border-gray-100 rounded-xl overflow-hidden bg-gray-50/50 flex flex-col">
-                <div class="relative h-44 bg-gray-200 overflow-hidden">
-                  ${cover ? `<img src="${escHtml(cover)}" alt="${escHtml(rm.room_name)}" class="w-full h-full object-cover" loading="lazy" />` : `<div class="w-full h-full flex items-center justify-center text-gray-400"><i class="fas fa-bed text-3xl"></i></div>`}
-                  <span class="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-[#051C12]/90 text-white">${escHtml(rm.room_type || 'Room')}</span>
-                  ${rmImgs.length > 1 ? `<span class="absolute bottom-2.5 right-2.5 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-black/65 text-white"><i class="fas fa-images mr-1"></i>${rmImgs.length}</span>` : ''}
+              <div id="roomCard-${rm.id}" data-room-card="${rm.id}" class="room-select-card border ${rIdx === 0 ? 'border-[#C9A84C] ring-2 ring-[#C9A84C]/30 bg-amber-50/20' : 'border-gray-200 bg-gray-50/50'} rounded-xl overflow-hidden flex flex-col transition-all">
+                <!-- Interactive Per-Room Carousel -->
+                <div class="relative h-48 bg-[#051C12] overflow-hidden group">
+                  ${cover ? `<img id="rmMainImg-${rm.id}" src="${escHtml(cover)}" alt="${escHtml(rm.room_name)}" class="w-full h-full object-cover cursor-pointer" onclick="openRoomLightbox(${firstLbIdx})" loading="lazy" />` : `<div class="w-full h-full flex items-center justify-center text-gray-400"><i class="fas fa-bed text-3xl"></i></div>`}
+                  <div class="absolute top-2.5 left-2.5 flex items-center gap-1.5">
+                    <span class="px-2.5 py-1 rounded text-[11px] font-bold uppercase tracking-wider bg-[#051C12]/90 text-white">${escHtml(rm.room_type)}</span>
+                    <span id="rmSelectedTag-${rm.id}" class="${rIdx === 0 ? '' : 'hidden '}px-2 py-1 rounded text-[11px] font-bold bg-[#C9A84C] text-[#051C12]">Selected</span>
+                  </div>
+                  ${rmImgs.length > 1 ? `
+                  <button type="button" onclick="stepRoomCarousel(${rm.id}, -1, event)" aria-label="Previous room photo" class="absolute left-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-white/90 text-gray-800 shadow flex items-center justify-center hover:bg-white cursor-pointer">
+                    <i class="fas fa-chevron-left text-xs"></i>
+                  </button>
+                  <button type="button" onclick="stepRoomCarousel(${rm.id}, 1, event)" aria-label="Next room photo" class="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-white/90 text-gray-800 shadow flex items-center justify-center hover:bg-white cursor-pointer">
+                    <i class="fas fa-chevron-right text-xs"></i>
+                  </button>
+                  <span id="rmCounter-${rm.id}" class="absolute bottom-2.5 right-2.5 px-2 py-0.5 rounded text-[11px] font-semibold bg-black/70 text-white tabular-nums">1 / ${rmImgs.length}</span>` : ''}
                 </div>
-                <div class="p-4 flex-1 flex flex-col">
+                ${rmImgs.length > 1 ? `
+                <!-- Thumbnail Strip -->
+                <div class="flex gap-1.5 px-3 pt-2.5 overflow-x-auto bg-white">
+                  ${rmImgs.map((u: string, i: number) => `
+                  <button type="button" onclick="setRoomCarousel(${rm.id}, ${i})" data-rm-thumb="${rm.id}-${i}" class="flex-shrink-0 w-12 h-9 rounded overflow-hidden border-2 ${i === 0 ? 'border-[#C9A84C]' : 'border-transparent opacity-70'} cursor-pointer">
+                    <img src="${escHtml(u)}" alt="${escHtml(rm.room_name)} photo ${i + 1}" class="w-full h-full object-cover" loading="lazy" />
+                  </button>`).join('')}
+                </div>` : ''}
+
+                <div class="p-4 flex-1 flex flex-col bg-white">
                   <div class="flex items-start justify-between gap-2 mb-1.5">
                     <h3 class="font-bold text-gray-900 text-base leading-snug">${escHtml(rm.room_name)}</h3>
-                    ${rate > 0 ? `<div class="text-right flex-shrink-0"><span class="text-sm font-bold" style="color:var(--navy);">₦${rate.toLocaleString()}</span><span class="text-[11px] text-gray-500 block">/ night</span></div>` : ''}
+                    <div class="text-right flex-shrink-0">
+                      <span class="text-base font-bold text-[#051C12] tabular-nums">₦${rm.price_per_night.toLocaleString('en-NG')}</span>
+                      <span class="text-[11px] text-gray-500 block">/ night</span>
+                    </div>
                   </div>
-                  <div class="flex items-center gap-3 text-xs text-gray-500 mb-2 flex-wrap">
-                    <span><i class="fas fa-user-friends mr-1" style="color:var(--gold);"></i>Up to ${rm.max_guests || 2} guests</span>
-                    <span><i class="fas fa-bed mr-1" style="color:var(--gold);"></i>${rm.bedrooms || 1} bed${(rm.bedrooms || 1) > 1 ? 's' : ''}</span>
-                    <span><i class="fas fa-bath mr-1" style="color:var(--gold);"></i>${rm.bathrooms || 1} bath${(rm.bathrooms || 1) > 1 ? 's' : ''}</span>
+                  <div class="flex items-center gap-3 text-xs text-gray-500 mb-2.5 flex-wrap tabular-nums">
+                    <span><i class="fas fa-user-friends mr-1" style="color:var(--gold);"></i>Up to ${rm.max_guests} guests</span>
+                    <span><i class="fas fa-bed mr-1" style="color:var(--gold);"></i>${rm.bedrooms} bed${rm.bedrooms > 1 ? 's' : ''}</span>
+                    <span><i class="fas fa-bath mr-1" style="color:var(--gold);"></i>${rm.bathrooms} bath${rm.bathrooms > 1 ? 's' : ''}</span>
                   </div>
                   ${rm.description ? `<p class="text-xs text-gray-600 leading-relaxed mb-3">${escHtml(rm.description)}</p>` : ''}
-                  ${rmAmenities.length > 0 ? `<div class="flex flex-wrap gap-1.5 mt-auto pt-2 border-t border-gray-100">${rmAmenities.slice(0, 6).map((a: string) => `<span class="text-[11px] px-2 py-0.5 rounded bg-white border border-gray-200 text-gray-600">${escHtml(a)}</span>`).join('')}</div>` : ''}
+                  ${rm.amenities.length > 0 ? `<div class="flex flex-wrap gap-1.5 mb-3">${rm.amenities.slice(0, 6).map((a: string) => `<span class="text-[11px] px-2 py-0.5 rounded bg-[#faf9f6] border border-gray-200 text-gray-600">${escHtml(a)}</span>`).join('')}</div>` : ''}
+
+                  <div class="mt-auto pt-3 border-t border-gray-100 flex items-center gap-2">
+                    <button type="button" id="rmSelectBtn-${rm.id}" onclick="selectBookingRoom(${rm.id}, true)" class="flex-1 py-2.5 px-3 rounded-lg text-xs font-bold transition-colors cursor-pointer ${rIdx === 0 ? 'bg-[#051C12] text-white' : 'bg-[#C9A84C] text-[#051C12] hover:bg-[#E2BE6E]'}">
+                      ${rIdx === 0 ? '<i class="fas fa-check mr-1"></i> Selected — Book Room' : '<i class="fas fa-calendar-check mr-1"></i> Select & Book This Room'}
+                    </button>
+                    ${rmImgs.length > 0 ? `
+                    <button type="button" onclick="openRoomLightbox(${firstLbIdx})" title="Zoom photos" class="px-3 py-2.5 rounded-lg border border-gray-200 text-xs font-semibold text-gray-700 hover:bg-gray-50 cursor-pointer">
+                      <i class="fas fa-expand-alt"></i>
+                    </button>` : ''}
+                  </div>
                 </div>
               </div>`
-            }).join('')}
+            }
+            const servicedRooms = parsedRooms.filter((rm) => /serviced/i.test(rm.room_type))
+            const hotelRooms = parsedRooms.filter((rm) => /hotel/i.test(rm.room_type))
+            const otherRooms = parsedRooms.filter((rm) => !/serviced|hotel/i.test(rm.room_type))
+            const hasSections = servicedRooms.length > 0 && hotelRooms.length > 0
+            if (hasSections) {
+              return `
+              <div class="space-y-7">
+                <div>
+                  <div class="flex items-center justify-between border-b border-gray-200 pb-2 mb-4">
+                    <h3 class="text-sm font-bold uppercase tracking-wider text-[#051C12]">Serviced Apartments</h3>
+                    <span class="text-xs font-semibold text-gray-500 tabular-nums">${servicedRooms.length} unit${servicedRooms.length > 1 ? 's' : ''}</span>
+                  </div>
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    ${servicedRooms.map((rm) => renderRoomCardHtml(rm, parsedRooms.indexOf(rm))).join('')}
+                  </div>
+                </div>
+                <div>
+                  <div class="flex items-center justify-between border-b border-gray-200 pb-2 mb-4">
+                    <h3 class="text-sm font-bold uppercase tracking-wider text-[#051C12]">Hotel Rooms</h3>
+                    <span class="text-xs font-semibold text-gray-500 tabular-nums">${hotelRooms.length} unit${hotelRooms.length > 1 ? 's' : ''}</span>
+                  </div>
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    ${hotelRooms.map((rm) => renderRoomCardHtml(rm, parsedRooms.indexOf(rm))).join('')}
+                  </div>
+                </div>
+                ${otherRooms.length > 0 ? `
+                <div>
+                  <div class="flex items-center justify-between border-b border-gray-200 pb-2 mb-4">
+                    <h3 class="text-sm font-bold uppercase tracking-wider text-[#051C12]">Additional Suites</h3>
+                  </div>
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    ${otherRooms.map((rm) => renderRoomCardHtml(rm, parsedRooms.indexOf(rm))).join('')}
+                  </div>
+                </div>` : ''}
+              </div>`
+            }
+            return `
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              ${parsedRooms.map((rm, rIdx) => renderRoomCardHtml(rm, rIdx)).join('')}
+            </div>`
+          })()}
+        </div>
+
+        <!-- Room Photos Lightbox Modal -->
+        <div id="roomLightboxModal" class="hidden fixed inset-0 z-[100] bg-black/90 flex items-center justify-center p-4">
+          <div class="max-w-4xl w-full bg-[#0b1510] rounded-2xl border border-white/15 overflow-hidden shadow-2xl">
+            <div class="flex items-center justify-between px-5 py-3.5 border-b border-white/10 text-white">
+              <div>
+                <p id="lbRoomTitle" class="font-bold text-sm text-white"></p>
+                <p id="lbRoomMeta" class="text-xs text-[#C9A84C] tabular-nums"></p>
+              </div>
+              <div class="flex items-center gap-2">
+                <button type="button" id="lbBookBtn" onclick="bookFromLightbox()" class="px-3.5 py-1.5 rounded-lg bg-[#C9A84C] text-[#051C12] text-xs font-bold cursor-pointer">Select &amp; Book Suite</button>
+                <button type="button" onclick="closeRoomLightbox()" class="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center cursor-pointer"><i class="fas fa-times"></i></button>
+              </div>
+            </div>
+            <div class="relative bg-black flex items-center justify-center" style="height:62vh; min-height:320px;">
+              <img id="lbImage" src="" alt="Room Photo" class="max-h-full max-w-full object-contain" />
+              <button type="button" onclick="stepLightbox(-1)" class="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 text-gray-900 flex items-center justify-center shadow cursor-pointer"><i class="fas fa-chevron-left"></i></button>
+              <button type="button" onclick="stepLightbox(1)" class="absolute right-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 text-gray-900 flex items-center justify-center shadow cursor-pointer"><i class="fas fa-chevron-right"></i></button>
+            </div>
+            <div id="lbThumbs" class="flex gap-2 p-3 overflow-x-auto bg-[#070f0b] border-t border-white/10"></div>
           </div>
         </div>` : ''}
 
@@ -4198,59 +5152,525 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
         <div class="sidebar-sticky lg:sticky lg:top-24 space-y-4">
           <!-- Book / Enquire Card -->
           ${isShortLet ? `
-          <div class="bg-white rounded-2xl shadow-md p-5">
-            <div class="text-center mb-4 pb-4 border-b">
-              <p class="text-2xl sm:text-3xl font-bold" style="color: var(--navy);">₦${prop.price_per_night?.toLocaleString() || prop.price.toLocaleString()}</p>
-              <p class="text-gray-500 text-sm">per night</p>
+          <div id="bookingCard" class="bg-white rounded-2xl shadow-lg border border-[#e6e1d6] overflow-hidden">
+            <div class="px-5 py-4 bg-[#051C12] text-white flex items-center justify-between gap-2">
+              <div>
+                <p class="text-[11px] font-bold uppercase tracking-widest text-[#C9A84C]" id="bookingSelectedRoomLabel">${defaultRoom ? escHtml(defaultRoom.room_name) : 'Direct Reservation'}</p>
+                <p class="text-2xl font-bold tabular-nums" id="bookingDisplayRate">₦${initialNightlyRate.toLocaleString('en-NG')} <span class="text-xs font-normal text-white/75">/ night</span></p>
+              </div>
+              <span class="text-[11px] font-semibold px-2.5 py-1 rounded bg-white/10 text-[#E2BE6E] whitespace-nowrap">Instant Request</span>
             </div>
-            <form id="bookingForm" class="space-y-3">
-              <div>
-                <label class="text-xs font-semibold text-gray-700 block mb-1">Check-in</label>
-                <input type="date" id="checkin" value="${today}" min="${today}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
+
+            <div class="p-5">
+              <form id="bookingForm" class="space-y-3.5">
+                ${parsedRooms.length > 0 ? `
+                <!-- Room Type Selection -->
+                <div>
+                  <label class="text-xs font-bold uppercase tracking-wide text-gray-700 block mb-1">1. Choose Room Type *</label>
+                  <select id="bookingRoomId" class="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm font-medium bg-white focus:outline-none focus:border-[#C9A84C]">
+                    ${parsedRooms.map((rm) => `<option value="${rm.id}">${escHtml(rm.room_name)} — ₦${rm.price_per_night.toLocaleString('en-NG')}/night</option>`).join('')}
+                  </select>
+                  <div id="bookingRoomPreview" class="mt-2 flex items-center gap-2.5 p-2 rounded-lg bg-[#faf9f6] border border-[#ebe6dc]">
+                    <img id="bkRoomImg" src="${escHtml(defaultRoom?.images?.[0] || '')}" alt="Selected suite" class="w-11 h-11 rounded object-cover flex-shrink-0 bg-gray-200" />
+                    <div class="min-w-0 flex-1 text-xs">
+                      <p id="bkRoomMeta" class="font-semibold text-[#051C12] truncate">${defaultRoom ? `${defaultRoom.bedrooms} Bed · ${defaultRoom.bathrooms} Bath · Max ${defaultRoom.max_guests} Guests` : ''}</p>
+                      <p class="text-gray-500">Free date check &amp; dedicated housekeeping</p>
+                    </div>
+                  </div>
+                </div>` : ''}
+
+                <!-- Dates + Live Availability -->
+                <div>
+                  <label class="text-xs font-bold uppercase tracking-wide text-gray-700 block mb-1">2. Select Stay Dates *</label>
+                  <div class="grid grid-cols-2 gap-2">
+                    <div>
+                      <span class="text-[11px] text-gray-500 block mb-0.5">Check-in</span>
+                      <input type="date" id="checkin" value="${today}" min="${today}" class="w-full px-2.5 py-2 border border-gray-300 rounded-lg text-xs focus:outline-none focus:border-[#C9A84C] bg-gray-50" required />
+                    </div>
+                    <div>
+                      <span class="text-[11px] text-gray-500 block mb-0.5">Check-out</span>
+                      <input type="date" id="checkout" value="${tomorrow}" min="${today}" class="w-full px-2.5 py-2 border border-gray-300 rounded-lg text-xs focus:outline-none focus:border-[#C9A84C] bg-gray-50" required />
+                    </div>
+                  </div>
+                  <div id="availabilityStatus" class="mt-2 text-xs px-2.5 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5">
+                    <i class="fas fa-check-circle"></i> Checking suite availability...
+                  </div>
+                </div>
+
+                <!-- Guest Steppers -->
+                <div>
+                  <div class="flex items-center justify-between mb-1">
+                    <label class="text-xs font-bold uppercase tracking-wide text-gray-700">3. Guests</label>
+                    <span id="guestLimitHint" class="text-[11px] text-gray-500">Max ${defaultRoom ? defaultRoom.max_guests : 4} guests</span>
+                  </div>
+                  <div class="grid grid-cols-2 gap-2">
+                    <div class="flex items-center justify-between px-2.5 py-1.5 border border-gray-300 rounded-lg bg-gray-50">
+                      <span class="text-xs font-medium text-gray-700">Adults</span>
+                      <div class="flex items-center gap-2">
+                        <button type="button" onclick="stepGuest('adults', -1)" class="w-6 h-6 rounded bg-white border border-gray-300 text-xs font-bold hover:bg-gray-100 cursor-pointer">-</button>
+                        <span id="adultsVal" class="text-xs font-bold w-4 text-center tabular-nums">1</span>
+                        <button type="button" onclick="stepGuest('adults', 1)" class="w-6 h-6 rounded bg-white border border-gray-300 text-xs font-bold hover:bg-gray-100 cursor-pointer">+</button>
+                      </div>
+                    </div>
+                    <div class="flex items-center justify-between px-2.5 py-1.5 border border-gray-300 rounded-lg bg-gray-50">
+                      <span class="text-xs font-medium text-gray-700">Children</span>
+                      <div class="flex items-center gap-2">
+                        <button type="button" onclick="stepGuest('children', -1)" class="w-6 h-6 rounded bg-white border border-gray-300 text-xs font-bold hover:bg-gray-100 cursor-pointer">-</button>
+                        <span id="childrenVal" class="text-xs font-bold w-4 text-center tabular-nums">0</span>
+                        <button type="button" onclick="stepGuest('children', 1)" class="w-6 h-6 rounded bg-white border border-gray-300 text-xs font-bold hover:bg-gray-100 cursor-pointer">+</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Arrival & Stay Purpose -->
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <label class="text-[11px] font-semibold text-gray-600 block mb-1">Arrival Time</label>
+                    <select id="arrivalTime" class="w-full px-2.5 py-2 border border-gray-300 rounded-lg text-xs bg-gray-50 focus:outline-none">
+                      <option value="12:00 - 14:00">12:00 - 14:00</option>
+                      <option value="14:00 - 17:00" selected>14:00 - 17:00</option>
+                      <option value="17:00 - 20:00">17:00 - 20:00</option>
+                      <option value="After 20:00">After 20:00</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="text-[11px] font-semibold text-gray-600 block mb-1">Stay Purpose</label>
+                    <select id="stayPurpose" class="w-full px-2.5 py-2 border border-gray-300 rounded-lg text-xs bg-gray-50 focus:outline-none">
+                      <option value="Leisure / Holiday">Leisure / Holiday</option>
+                      <option value="Business / Corporate">Business / Corporate</option>
+                      <option value="Family Vacation">Family Vacation</option>
+                      <option value="Relocation / Extended">Relocation / Extended</option>
+                      <option value="Private Retreat">Private Retreat</option>
+                    </select>
+                  </div>
+                </div>
+
+                <!-- Optional Concierge Add-ons -->
+                <div>
+                  <label class="text-xs font-bold uppercase tracking-wide text-gray-700 block mb-1.5">4. Concierge Add-Ons <span class="font-normal text-gray-400 normal-case">(optional)</span></label>
+                  <div class="space-y-1.5 text-xs">
+                    ${[
+                      ['airport_pickup', 'Airport Chauffeur Pickup', '+₦25,000'],
+                      ['early_late', 'Early Check-in & Late Check-out', '+₦15,000'],
+                      ['breakfast_chef', 'Daily Breakfast / Private Chef', '+₦12,000 / night'],
+                      ['laundry', 'Express Laundry & Pressing', '+₦8,000'],
+                    ].map(([val, lbl, priceTxt]) => `
+                    <label class="flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg border border-gray-200 hover:border-[#C9A84C] bg-[#faf9f6] cursor-pointer">
+                      <span class="flex items-center gap-2 text-gray-700 font-medium">
+                        <input type="checkbox" class="bk-addon accent-[#051C12]" value="${val}" onchange="calcBookingTotals()" />
+                        ${lbl}
+                      </span>
+                      <span class="font-semibold text-[#051C12] tabular-nums whitespace-nowrap">${priceTxt}</span>
+                    </label>`).join('')}
+                  </div>
+                </div>
+
+                <!-- Promo / Corporate Code -->
+                <div>
+                  <label class="text-[11px] font-semibold text-gray-600 block mb-1">Promo Code <span class="text-gray-400 font-normal">(e.g. PURECREST10, RICHGATE15 · 7+ nights 10% off)</span></label>
+                  <div class="flex gap-1.5">
+                    <input type="text" id="promoCodeInput" placeholder="Enter code" class="flex-1 px-2.5 py-2 border border-gray-300 rounded-lg text-xs uppercase bg-gray-50 focus:outline-none focus:border-[#C9A84C]" />
+                    <button type="button" onclick="applyPromoCode()" class="px-3 py-2 rounded-lg bg-[#051C12] text-white text-xs font-bold cursor-pointer">Apply</button>
+                  </div>
+                  <p id="promoFeedback" class="hidden text-[11px] mt-1 font-medium"></p>
+                </div>
+
+                <!-- Itemized Live Pricing Summary -->
+                <div id="priceCalc" class="rounded-xl p-3.5 text-xs bg-[#f5f3ee] border border-[#e3ddd0] space-y-1.5 tabular-nums">
+                  <div class="flex justify-between text-gray-700"><span id="roomCalcLabel">Suite × 1 night</span><span id="subtotalPrice">₦0</span></div>
+                  <div id="addonsRow" class="hidden flex justify-between text-gray-700"><span>Concierge Add-ons</span><span id="addonsPrice">₦0</span></div>
+                  <div id="discountRow" class="hidden flex justify-between text-emerald-700 font-semibold"><span id="discountLabel">Discount</span><span id="discountAmount">-₦0</span></div>
+                  <div class="flex justify-between font-bold text-sm border-t border-[#dfd9cc] pt-2 text-[#051C12]"><span>Estimated Total</span><span id="totalPrice">₦0</span></div>
+                </div>
+
+                <!-- Guest Contact & Payment Preference -->
+                <div class="space-y-2.5 pt-1">
+                  <label class="text-xs font-bold uppercase tracking-wide text-gray-700 block">5. Guest &amp; Payment Details</label>
+                  <input type="text" id="guestName" placeholder="Full Name *" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-[#C9A84C] bg-gray-50" required />
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <input type="tel" id="guestPhone" placeholder="Phone / WhatsApp *" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-[#C9A84C] bg-gray-50" required />
+                    <input type="email" id="guestEmail" placeholder="Email Address" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-[#C9A84C] bg-gray-50" />
+                  </div>
+                  <select id="paymentMethod" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs font-medium bg-gray-50 focus:outline-none">
+                    <option value="transfer">Bank Transfer (Instant Reservation Hold)</option>
+                    <option value="arrival">Reserve Now, Pay at Check-in</option>
+                    <option value="corporate">Corporate / Company Invoice</option>
+                  </select>
+                  <textarea id="guestRequests" rows="2" placeholder="Special requests (dietary notes, flight number, extra pillows)..." class="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs bg-gray-50 focus:outline-none focus:border-[#C9A84C] resize-none"></textarea>
+                </div>
+
+                <div id="bookingError" class="hidden text-xs px-3 py-2 rounded-lg bg-red-50 text-red-700 border border-red-200 font-medium"></div>
+
+                <button type="submit" id="bookingSubmitBtn" class="w-full py-3 rounded-xl font-bold text-sm bg-[#C9A84C] hover:bg-[#E2BE6E] text-[#051C12] transition-colors shadow-sm cursor-pointer">
+                  Complete Room Reservation
+                </button>
+              </form>
+
+              <!-- Rich Confirmation Receipt -->
+              <div id="bookingSuccess" class="hidden py-2 space-y-3">
+                <div class="text-center">
+                  <div class="w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto mb-2">
+                    <i class="fas fa-check-circle text-2xl"></i>
+                  </div>
+                  <h3 class="font-bold text-gray-900 text-base">Reservation Confirmed!</h3>
+                  <p class="text-xs font-mono font-bold text-[#A8883A] mt-0.5" id="bookingRef"></p>
+                </div>
+                <div class="rounded-xl bg-[#faf9f6] border border-[#e3ddd0] p-3.5 text-xs space-y-1.5 tabular-nums">
+                  <div class="flex justify-between"><span class="text-gray-500">Suite:</span><span id="rcRoom" class="font-bold text-[#051C12]"></span></div>
+                  <div class="flex justify-between"><span class="text-gray-500">Stay:</span><span id="rcDates" class="font-medium text-gray-800"></span></div>
+                  <div class="flex justify-between"><span class="text-gray-500">Guests:</span><span id="rcGuests" class="font-medium text-gray-800"></span></div>
+                  <div class="flex justify-between border-t border-[#e3ddd0] pt-1.5 font-bold text-sm text-[#051C12]"><span>Total:</span><span id="rcTotal"></span></div>
+                </div>
+                <a id="rcWhatsAppBtn" href="https://wa.me/2349130403970" target="_blank" rel="noopener" class="w-full py-2.5 rounded-xl bg-[#25d366] text-white font-bold text-xs flex items-center justify-center gap-2" style="text-decoration:none;">
+                  <i class="fab fa-whatsapp text-sm"></i> Send Booking Ref via WhatsApp
+                </a>
+                <button type="button" onclick="resetBookingForm()" class="w-full py-2 rounded-lg border border-gray-300 text-xs font-semibold text-gray-700 hover:bg-gray-50 cursor-pointer">
+                  Book Another Room
+                </button>
               </div>
-              <div>
-                <label class="text-xs font-semibold text-gray-700 block mb-1">Check-out</label>
-                <input type="date" id="checkout" value="${tomorrow}" min="${today}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
-              </div>
-              <div>
-                <label class="text-xs font-semibold text-gray-700 block mb-1">Guests</label>
-                <select id="guests" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;">
-                  <option value="1">1 Guest</option><option value="2">2 Guests</option><option value="3">3 Guests</option><option value="4">4+ Guests</option>
-                </select>
-              </div>
-              <div id="priceCalc" class="hidden rounded-xl p-3 text-sm" style="background: rgba(15,28,63,0.05);">
-                <div class="flex justify-between text-gray-600"><span>Nights:</span><span id="nightsCount">0</span></div>
-                <div class="flex justify-between font-bold border-t mt-1 pt-1 text-gray-800"><span>Total:</span><span id="totalPrice">₦0</span></div>
-              </div>
-              <input type="text" id="guestName" placeholder="Your Full Name *" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
-              <input type="tel" id="guestPhone" placeholder="Phone Number *" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
-              <input type="email" id="guestEmail" placeholder="Email (optional)" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" />
-              <button type="submit" class="w-full btn-gold text-white py-3 rounded-xl font-semibold text-sm">Request Booking</button>
-            </form>
-            <div id="bookingSuccess" class="hidden text-center py-4">
-              <i class="fas fa-check-circle text-4xl text-emerald-500 mb-2 block"></i>
-              <p class="font-semibold text-gray-800">Booking Request Sent!</p>
-              <p class="text-sm text-gray-500" id="bookingRef"></p>
-              <p class="text-sm text-gray-500">We'll contact you shortly.</p>
             </div>
+
             <script>
-              const pricePerNight = ${prop.price_per_night || prop.price};
-              function calcNights(){
-                const ci = document.getElementById('checkin').value;
-                const co = document.getElementById('checkout').value;
-                if(ci && co){ const nights = Math.ceil((new Date(co) - new Date(ci)) / 86400000); if(nights > 0){ document.getElementById('nightsCount').textContent = nights; document.getElementById('totalPrice').textContent = '₦' + (nights * pricePerNight).toLocaleString(); document.getElementById('priceCalc').classList.remove('hidden'); } }
+            (function() {
+              var ROOMS_DATA = ${parsedRoomsJson};
+              var ALL_ROOM_PHOTOS = ${allRoomPhotosJson};
+              var PROP_ID = ${prop.id};
+              var PROP_LIST_ID = '${escHtml(prop.listing_id)}';
+              var PROP_TITLE = '${escHtml(prop.title).replace(/'/g, "\\'")}';
+              var PROP_BASE_RATE = ${Number(prop.price_per_night || prop.price || 0)};
+              var roomSlideIndex = {};
+              var currentRoomId = ROOMS_DATA.length ? ROOMS_DATA[0].id : null;
+              var adultsCount = 1;
+              var childrenCount = 0;
+              var activePromo = '';
+              var lbIdx = 0;
+
+              function getRoom(rid) {
+                return ROOMS_DATA.find(function(r) { return Number(r.id) === Number(rid); }) || null;
               }
-              document.getElementById('checkin').addEventListener('change', calcNights);
-              document.getElementById('checkout').addEventListener('change', calcNights);
-              calcNights();
-              document.getElementById('bookingForm').addEventListener('submit', async (e) => {
-                e.preventDefault(); const btn = e.target.querySelector('button[type=submit]'); btn.disabled=true; btn.textContent='Submitting...';
-                try {
-                  const res = await fetch('/api/bookings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ property_id:${prop.id}, listing_id:'${prop.listing_id}', title:'${prop.title.replace(/'/g,"\\'")}', checkin:document.getElementById('checkin').value, checkout:document.getElementById('checkout').value, guests:document.getElementById('guests').value, name:document.getElementById('guestName').value, phone:document.getElementById('guestPhone').value, email:document.getElementById('guestEmail').value, price_per_night:pricePerNight }) });
-                  const data = await res.json();
-                  if(data.success){ document.getElementById('bookingForm').classList.add('hidden'); document.getElementById('bookingSuccess').classList.remove('hidden'); document.getElementById('bookingRef').textContent='Booking Ref: '+data.booking_ref; } else { btn.disabled=false; btn.textContent='Request Booking'; }
-                } catch(err){ btn.disabled=false; btn.textContent='Request Booking'; }
+
+              window.setRoomCarousel = function(rid, idx) {
+                var rm = getRoom(rid);
+                if (!rm || !rm.images || !rm.images.length) return;
+                var len = rm.images.length;
+                var nextIdx = ((idx % len) + len) % len;
+                roomSlideIndex[rid] = nextIdx;
+                var imgEl = document.getElementById('rmMainImg-' + rid);
+                if (imgEl) imgEl.src = rm.images[nextIdx];
+                var cntEl = document.getElementById('rmCounter-' + rid);
+                if (cntEl) cntEl.textContent = (nextIdx + 1) + ' / ' + len;
+                document.querySelectorAll('[data-rm-thumb^="' + rid + '-"]').forEach(function(btn, bIdx) {
+                  btn.className = 'flex-shrink-0 w-12 h-9 rounded overflow-hidden border-2 cursor-pointer ' + (bIdx === nextIdx ? 'border-[#C9A84C]' : 'border-transparent opacity-70');
+                });
+              };
+
+              window.stepRoomCarousel = function(rid, delta, ev) {
+                if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+                var cur = roomSlideIndex[rid] || 0;
+                window.setRoomCarousel(rid, cur + delta);
+              };
+
+              window.openRoomLightbox = function(startIdx) {
+                var modal = document.getElementById('roomLightboxModal');
+                if (!modal || !ALL_ROOM_PHOTOS.length) return;
+                lbIdx = Math.max(0, Math.min(startIdx || 0, ALL_ROOM_PHOTOS.length - 1));
+                renderLightbox();
+                modal.classList.remove('hidden');
+              };
+
+              window.closeRoomLightbox = function() {
+                var modal = document.getElementById('roomLightboxModal');
+                if (modal) modal.classList.add('hidden');
+              };
+
+              window.stepLightbox = function(delta) {
+                if (!ALL_ROOM_PHOTOS.length) return;
+                lbIdx = (lbIdx + delta + ALL_ROOM_PHOTOS.length) % ALL_ROOM_PHOTOS.length;
+                renderLightbox();
+              };
+
+              window.bookFromLightbox = function() {
+                var p = ALL_ROOM_PHOTOS[lbIdx];
+                window.closeRoomLightbox();
+                if (p && p.roomId) window.selectBookingRoom(p.roomId, true);
+              };
+
+              function renderLightbox() {
+                var p = ALL_ROOM_PHOTOS[lbIdx];
+                if (!p) return;
+                var imgEl = document.getElementById('lbImage');
+                var titleEl = document.getElementById('lbRoomTitle');
+                var metaEl = document.getElementById('lbRoomMeta');
+                var thumbsEl = document.getElementById('lbThumbs');
+                if (imgEl) imgEl.src = p.url;
+                if (titleEl) titleEl.textContent = p.roomName;
+                if (metaEl) metaEl.textContent = '₦' + Number(p.price || 0).toLocaleString('en-NG') + ' / night · Photo ' + (lbIdx + 1) + ' of ' + ALL_ROOM_PHOTOS.length;
+                if (thumbsEl) {
+                  thumbsEl.innerHTML = '';
+                  ALL_ROOM_PHOTOS.forEach(function(item, idx) {
+                    var btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'flex-shrink-0 w-16 h-11 rounded overflow-hidden border-2 cursor-pointer ' + (idx === lbIdx ? 'border-[#C9A84C]' : 'border-transparent opacity-60');
+                    btn.onclick = function() { lbIdx = idx; renderLightbox(); };
+                    btn.innerHTML = '<img src="' + item.url.replace(/"/g, '&quot;') + '" class="w-full h-full object-cover" />';
+                    thumbsEl.appendChild(btn);
+                  });
+                }
+              }
+
+              document.addEventListener('keydown', function(e) {
+                var modal = document.getElementById('roomLightboxModal');
+                if (!modal || modal.classList.contains('hidden')) return;
+                if (e.key === 'Escape') window.closeRoomLightbox();
+                else if (e.key === 'ArrowRight') window.stepLightbox(1);
+                else if (e.key === 'ArrowLeft') window.stepLightbox(-1);
               });
+
+              window.selectBookingRoom = function(rid, scrollToCard) {
+                var rm = getRoom(rid);
+                if (!rm) return;
+                currentRoomId = rm.id;
+                var sel = document.getElementById('bookingRoomId');
+                if (sel && String(sel.value) !== String(rm.id)) sel.value = String(rm.id);
+
+                document.querySelectorAll('.room-select-card').forEach(function(card) {
+                  var cid = Number(card.getAttribute('data-room-card'));
+                  var isSel = cid === Number(rm.id);
+                  card.className = 'room-select-card border rounded-xl overflow-hidden flex flex-col transition-all ' + (isSel ? 'border-[#C9A84C] ring-2 ring-[#C9A84C]/30 bg-amber-50/20' : 'border-gray-200 bg-gray-50/50');
+                  var tag = document.getElementById('rmSelectedTag-' + cid);
+                  if (tag) tag.classList.toggle('hidden', !isSel);
+                  var btn = document.getElementById('rmSelectBtn-' + cid);
+                  if (btn) {
+                    btn.className = 'flex-1 py-2.5 px-3 rounded-lg text-xs font-bold transition-colors cursor-pointer ' + (isSel ? 'bg-[#051C12] text-white' : 'bg-[#C9A84C] text-[#051C12] hover:bg-[#E2BE6E]');
+                    btn.innerHTML = isSel ? '<i class="fas fa-check mr-1"></i> Selected — Book Room' : '<i class="fas fa-calendar-check mr-1"></i> Select & Book This Room';
+                  }
+                });
+
+                var lblEl = document.getElementById('bookingSelectedRoomLabel');
+                var rateEl = document.getElementById('bookingDisplayRate');
+                var imgEl = document.getElementById('bkRoomImg');
+                var metaEl = document.getElementById('bkRoomMeta');
+                var limitEl = document.getElementById('guestLimitHint');
+                if (lblEl) lblEl.textContent = rm.room_name;
+                if (rateEl) rateEl.innerHTML = '₦' + Number(rm.price_per_night).toLocaleString('en-NG') + ' <span class="text-xs font-normal text-white/75">/ night</span>';
+                if (imgEl && rm.images && rm.images[0]) imgEl.src = rm.images[0];
+                if (metaEl) metaEl.textContent = rm.bedrooms + ' Bed · ' + rm.bathrooms + ' Bath · Max ' + rm.max_guests + ' Guests';
+                if (limitEl) limitEl.textContent = 'Max ' + rm.max_guests + ' guests for this room';
+
+                if (adultsCount + childrenCount > rm.max_guests) {
+                  childrenCount = Math.max(0, Math.min(childrenCount, rm.max_guests - 1));
+                  adultsCount = Math.max(1, Math.min(adultsCount, rm.max_guests - childrenCount));
+                  document.getElementById('adultsVal').textContent = String(adultsCount);
+                  document.getElementById('childrenVal').textContent = String(childrenCount);
+                }
+
+                window.calcBookingTotals();
+                checkAvailability();
+                if (scrollToCard) {
+                  var card = document.getElementById('bookingCard');
+                  if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }
+              };
+
+              window.stepGuest = function(kind, delta) {
+                var rm = getRoom(currentRoomId);
+                var maxG = rm ? rm.max_guests : 8;
+                var nextA = adultsCount;
+                var nextC = childrenCount;
+                if (kind === 'adults') nextA = Math.max(1, adultsCount + delta);
+                else nextC = Math.max(0, childrenCount + delta);
+                if (nextA + nextC > maxG) return;
+                adultsCount = nextA;
+                childrenCount = nextC;
+                document.getElementById('adultsVal').textContent = String(adultsCount);
+                document.getElementById('childrenVal').textContent = String(childrenCount);
+              };
+
+              window.applyPromoCode = function() {
+                var inp = document.getElementById('promoCodeInput');
+                var fb = document.getElementById('promoFeedback');
+                var code = (inp ? inp.value : '').trim().toUpperCase();
+                activePromo = code;
+                if (fb) {
+                  fb.classList.remove('hidden');
+                  if (code === 'RICHGATE15') {
+                    fb.className = 'text-[11px] mt-1 font-semibold text-emerald-700';
+                    fb.textContent = 'RICHGATE15 applied: 15% suite discount';
+                  } else if (code === 'PURECREST10') {
+                    fb.className = 'text-[11px] mt-1 font-semibold text-emerald-700';
+                    fb.textContent = 'PURECREST10 applied: 10% booking discount';
+                  } else if (!code) {
+                    fb.classList.add('hidden');
+                  } else {
+                    fb.className = 'text-[11px] mt-1 font-medium text-amber-700';
+                    fb.textContent = 'Code not recognized. Extended stays (7+ nights) automatically receive 10% off.';
+                  }
+                }
+                window.calcBookingTotals();
+              };
+
+              window.calcBookingTotals = function() {
+                var ci = document.getElementById('checkin').value;
+                var co = document.getElementById('checkout').value;
+                var nights = 1;
+                if (ci && co) {
+                  var diff = Math.ceil((new Date(co) - new Date(ci)) / 86400000);
+                  nights = diff > 0 ? diff : 0;
+                }
+                var rm = getRoom(currentRoomId);
+                var rate = rm ? rm.price_per_night : PROP_BASE_RATE;
+                var subtotal = rate * nights;
+
+                var addonPrices = { airport_pickup: 25000, early_late: 15000, breakfast_chef: 12000 * Math.max(1, nights), laundry: 8000 };
+                var addonsTotal = 0;
+                document.querySelectorAll('.bk-addon:checked').forEach(function(cb) {
+                  addonsTotal += (addonPrices[cb.value] || 0);
+                });
+
+                var discountRate = 0;
+                var discountLbl = '';
+                if (activePromo === 'RICHGATE15') { discountRate = 0.15; discountLbl = 'Promo (RICHGATE15 · 15%)'; }
+                else if (activePromo === 'PURECREST10') { discountRate = 0.10; discountLbl = 'Promo (PURECREST10 · 10%)'; }
+                else if (nights >= 7) { discountRate = 0.10; discountLbl = 'Extended Stay Discount (10%)'; }
+                var discountAmt = Math.round(subtotal * discountRate);
+                var grandTotal = Math.max(0, subtotal - discountAmt + addonsTotal);
+
+                document.getElementById('roomCalcLabel').textContent = (rm ? rm.room_name : 'Rate') + ' × ' + nights + ' night' + (nights === 1 ? '' : 's');
+                document.getElementById('subtotalPrice').textContent = '₦' + subtotal.toLocaleString('en-NG');
+                var aRow = document.getElementById('addonsRow');
+                if (addonsTotal > 0) {
+                  aRow.classList.remove('hidden');
+                  document.getElementById('addonsPrice').textContent = '+₦' + addonsTotal.toLocaleString('en-NG');
+                } else {
+                  aRow.classList.add('hidden');
+                }
+                var dRow = document.getElementById('discountRow');
+                if (discountAmt > 0) {
+                  dRow.classList.remove('hidden');
+                  document.getElementById('discountLabel').textContent = discountLbl;
+                  document.getElementById('discountAmount').textContent = '-₦' + discountAmt.toLocaleString('en-NG');
+                } else {
+                  dRow.classList.add('hidden');
+                }
+                document.getElementById('totalPrice').textContent = '₦' + grandTotal.toLocaleString('en-NG');
+              };
+
+              async function checkAvailability() {
+                var ci = document.getElementById('checkin').value;
+                var co = document.getElementById('checkout').value;
+                var statusEl = document.getElementById('availabilityStatus');
+                if (!statusEl || !ci || !co) return;
+                if (co <= ci) {
+                  statusEl.className = 'mt-2 text-xs px-2.5 py-1.5 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 flex items-center gap-1.5';
+                  statusEl.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Check-out must be after check-in.';
+                  return;
+                }
+                try {
+                  var url = '/api/properties/' + PROP_ID + '/availability?checkin=' + encodeURIComponent(ci) + '&checkout=' + encodeURIComponent(co) + (currentRoomId ? '&room_id=' + currentRoomId : '');
+                  var res = await fetch(url);
+                  var data = await res.json();
+                  if (data.available !== false) {
+                    statusEl.className = 'mt-2 text-xs px-2.5 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5';
+                    statusEl.innerHTML = '<i class="fas fa-check-circle"></i> Available for your selected dates';
+                  } else {
+                    statusEl.className = 'mt-2 text-xs px-2.5 py-1.5 rounded-lg bg-red-50 text-red-700 border border-red-200 flex items-center gap-1.5';
+                    statusEl.innerHTML = '<i class="fas fa-calendar-times"></i> Dates overlap another reservation — pick another date or room.';
+                  }
+                } catch(_) {}
+              }
+
+              window.resetBookingForm = function() {
+                document.getElementById('bookingSuccess').classList.add('hidden');
+                document.getElementById('bookingForm').classList.remove('hidden');
+                var btn = document.getElementById('bookingSubmitBtn');
+                if (btn) { btn.disabled = false; btn.textContent = 'Complete Room Reservation'; }
+              };
+
+              var roomSel = document.getElementById('bookingRoomId');
+              if (roomSel) {
+                roomSel.addEventListener('change', function() { window.selectBookingRoom(Number(this.value), false); });
+              }
+              document.getElementById('checkin').addEventListener('change', function() { window.calcBookingTotals(); checkAvailability(); });
+              document.getElementById('checkout').addEventListener('change', function() { window.calcBookingTotals(); checkAvailability(); });
+
+              // Check ?room=ID query param to preselect a room
+              try {
+                var qsRoom = new URLSearchParams(window.location.search).get('room');
+                if (qsRoom && getRoom(Number(qsRoom))) {
+                  window.selectBookingRoom(Number(qsRoom), false);
+                } else {
+                  window.calcBookingTotals();
+                  checkAvailability();
+                }
+              } catch(_) {
+                window.calcBookingTotals();
+                checkAvailability();
+              }
+
+              document.getElementById('bookingForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                var errBox = document.getElementById('bookingError');
+                if (errBox) errBox.classList.add('hidden');
+                var btn = document.getElementById('bookingSubmitBtn');
+                btn.disabled = true;
+                btn.textContent = 'Confirming Reservation...';
+
+                var rm = getRoom(currentRoomId);
+                var addons = Array.from(document.querySelectorAll('.bk-addon:checked')).map(function(cb) { return cb.value; });
+                var payload = {
+                  property_id: PROP_ID,
+                  listing_id: PROP_LIST_ID,
+                  title: PROP_TITLE,
+                  room_id: currentRoomId,
+                  room_name: rm ? rm.room_name : '',
+                  checkin: document.getElementById('checkin').value,
+                  checkout: document.getElementById('checkout').value,
+                  adults: adultsCount,
+                  children: childrenCount,
+                  guests: adultsCount + childrenCount,
+                  arrival_time: document.getElementById('arrivalTime').value,
+                  stay_purpose: document.getElementById('stayPurpose').value,
+                  addons: addons,
+                  promo_code: activePromo || (document.getElementById('promoCodeInput')?.value || '').trim(),
+                  payment_method: document.getElementById('paymentMethod').value,
+                  requests: document.getElementById('guestRequests').value,
+                  name: document.getElementById('guestName').value,
+                  phone: document.getElementById('guestPhone').value,
+                  email: document.getElementById('guestEmail').value,
+                  price_per_night: rm ? rm.price_per_night : PROP_BASE_RATE
+                };
+
+                try {
+                  var res = await fetch('/api/bookings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                  });
+                  var data = await res.json();
+                  if (data.success) {
+                    document.getElementById('bookingForm').classList.add('hidden');
+                    document.getElementById('bookingSuccess').classList.remove('hidden');
+                    document.getElementById('bookingRef').textContent = 'Booking Ref: ' + data.booking_ref;
+                    document.getElementById('rcRoom').textContent = data.room_name || PROP_TITLE;
+                    document.getElementById('rcDates').textContent = data.checkin + ' → ' + data.checkout + ' (' + data.nights + ' nights)';
+                    document.getElementById('rcGuests').textContent = adultsCount + ' Adult' + (adultsCount > 1 ? 's' : '') + (childrenCount > 0 ? ', ' + childrenCount + ' Child' + (childrenCount > 1 ? 'ren' : '') : '');
+                    document.getElementById('rcTotal').textContent = '₦' + Number(data.total || 0).toLocaleString('en-NG');
+                    var waMsg = 'Hello Purecrest, I just booked ' + (data.room_name || PROP_TITLE) + ' (' + PROP_TITLE + '). Ref: ' + data.booking_ref + ', Dates: ' + data.checkin + ' to ' + data.checkout + ', Total: ₦' + Number(data.total || 0).toLocaleString('en-NG');
+                    var waBtn = document.getElementById('rcWhatsAppBtn');
+                    if (waBtn) waBtn.href = 'https://wa.me/2349130403970?text=' + encodeURIComponent(waMsg);
+                  } else {
+                    if (errBox) { errBox.textContent = data.error || 'Could not complete reservation.'; errBox.classList.remove('hidden'); }
+                    btn.disabled = false;
+                    btn.textContent = 'Complete Room Reservation';
+                  }
+                } catch(err) {
+                  if (errBox) { errBox.textContent = 'Network error submitting booking. Please try again.'; errBox.classList.remove('hidden'); }
+                  btn.disabled = false;
+                  btn.textContent = 'Complete Room Reservation';
+                }
+              });
+            })();
             </script>
           </div>` : `
           <div class="bg-white rounded-2xl shadow-md p-5">
@@ -9040,6 +10460,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
           class="space-y-5" id="propForm" onsubmit="return beforeSubmit()">
       ${isEdit ? `<input type="hidden" name="id" value="${propId}" />` : ''}
       <input type="hidden" name="pending_video_ids" id="pendingVideoIds" value="" />
+      <input type="hidden" name="pending_rooms_json" id="pendingRoomsJson" value="" />
 
       <!-- ── BASIC INFO ─────────────────────────────── -->
       <div class="bg-white rounded-xl border border-slate-200/80 shadow-sm p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -9121,8 +10542,26 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
             <option value="Kano"></option>
           </datalist>
         </div>
-        <div><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Area / District</label><input type="text" name="area" value="${escHtml(property?.area || '')}" placeholder="e.g. Maitama, Lekki Phase 1" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
-        <div><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Location Display</label><input type="text" name="location" value="${escHtml(property?.location || '')}" placeholder="e.g. Maitama, Abuja" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
+        <div>
+          <label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Area / District</label>
+          <input type="text" name="area" list="areaOptions" value="${escHtml(property?.area || '')}" placeholder="e.g. Independence Layout, Maitama, Lekki Phase 1" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" />
+          <datalist id="areaOptions">
+            <option value="Independence Layout"></option>
+            <option value="New Haven"></option>
+            <option value="GRA Enugu"></option>
+            <option value="Trans-Ekulu"></option>
+            <option value="Achara Layout"></option>
+            <option value="Maitama"></option>
+            <option value="Asokoro"></option>
+            <option value="Wuse II"></option>
+            <option value="Gwarinpa"></option>
+            <option value="Ikoyi"></option>
+            <option value="Victoria Island"></option>
+            <option value="Lekki Phase 1"></option>
+            <option value="Banana Island"></option>
+          </datalist>
+        </div>
+        <div><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Location Display</label><input type="text" name="location" value="${escHtml(property?.location || '')}" placeholder="e.g. Independence Layout, Enugu" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
         <div class="col-span-full"><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Full Address</label><input type="text" name="address" value="${escHtml(property?.address || '')}" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
         <div class="flex items-center gap-2 col-span-full pt-1">
           <input type="checkbox" name="is_featured" id="is_featured" value="1" ${property?.is_featured ? 'checked' : ''} class="w-4 h-4 accent-amber-600" />
@@ -9282,99 +10721,105 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         </div>
         <div class="flex items-center gap-2">
           <span id="roomsCountBadge" class="text-xs font-semibold px-2.5 py-1 rounded-full bg-violet-50 text-violet-700">0 rooms</span>
-          ${isEdit ? `<button type="button" id="openNewRoomBtn" class="px-3.5 py-2 rounded-lg text-xs font-semibold text-white" style="background:#0B1F3A;"><i class="fas fa-plus mr-1.5"></i>Add Room / Suite</button>` : ''}
+          <button type="button" id="openNewRoomBtn" class="px-3.5 py-2 rounded-lg text-xs font-semibold text-white" style="background:#0B1F3A;"><i class="fas fa-plus mr-1.5"></i>Add Room / Suite</button>
         </div>
       </div>
 
       ${!isEdit ? `
-        <div class="rounded-xl bg-amber-50 border border-amber-200 p-4 flex items-start gap-3 text-sm text-amber-900">
+        <div class="rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 flex items-start gap-2.5 text-xs text-amber-900">
           <i class="fas fa-info-circle text-amber-600 mt-0.5"></i>
+          <span>Add room types and upload their photos below right now — all queued rooms and database-backed photos will publish automatically when you click <strong>Save Property</strong>.</span>
+        </div>
+      ` : ''}
+
+      <div id="roomsListGrid" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+
+      <!-- Inline Add / Edit Room Panel -->
+      <div id="roomEditorPanel" class="hidden rounded-xl border border-slate-200 bg-slate-50/80 p-5 space-y-4">
+        <div class="flex items-center justify-between pb-2 border-b border-slate-200">
+          <h3 id="roomEditorTitle" class="font-bold text-slate-800 text-sm">Add New Room</h3>
+          <button type="button" onclick="closeRoomEditor()" class="text-xs text-slate-500 hover:text-slate-800 font-semibold"><i class="fas fa-times mr-1"></i>Close</button>
+        </div>
+
+        <input type="hidden" id="rmEditId" value="" />
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
-            <p class="font-semibold">Save this shortlet listing first</p>
-            <p class="text-xs text-amber-800 mt-0.5">Click <strong>Save Property</strong> above first. Right after saving, you can add individual rooms/units and upload dedicated photos for each room here.</p>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Room / Suite Name <span class="text-red-500">*</span></label>
+            <input type="text" id="rmName" placeholder="e.g. Executive King Suite" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white" />
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Room Type</label>
+            <select id="rmType" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white">
+              <option value="Serviced Apartment">Serviced Apartment</option>
+              <option value="Hotel Room">Hotel Room</option>
+              <option value="Studio">Studio</option>
+              <option value="Deluxe Room">Deluxe Room</option>
+              <option value="Executive Suite">Executive Suite</option>
+              <option value="1-Bedroom Suite">1-Bedroom Suite</option>
+              <option value="2-Bedroom Apartment">2-Bedroom Apartment</option>
+              <option value="3-Bedroom Apartment">3-Bedroom Apartment</option>
+              <option value="Penthouse Suite">Penthouse Suite</option>
+              <option value="Room">Room</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Price Per Night (₦)</label>
+            <input type="number" id="rmPrice" min="0" placeholder="e.g. 95000" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white" />
+          </div>
+          <div class="grid grid-cols-3 gap-2">
+            <div><label class="block text-xs font-semibold text-slate-600 mb-1">Guests</label><input type="number" id="rmGuests" min="1" value="2" class="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-sm bg-white" /></div>
+            <div><label class="block text-xs font-semibold text-slate-600 mb-1">Beds</label><input type="number" id="rmBeds" min="0" value="1" class="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-sm bg-white" /></div>
+            <div><label class="block text-xs font-semibold text-slate-600 mb-1">Baths</label><input type="number" id="rmBaths" min="0" value="1" class="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-sm bg-white" /></div>
+          </div>
+          <div class="col-span-full">
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Room Description</label>
+            <textarea id="rmDesc" rows="2" placeholder="Highlight room views, bed size, workspace, balcony..." class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white"></textarea>
+          </div>
+          <div class="col-span-full">
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Room Amenities <span class="text-slate-400 font-normal">(one per line)</span></label>
+            <textarea id="rmAmenities" rows="2" placeholder="King Bed&#10;Smart TV&#10;En-suite Bath&#10;High-speed WiFi" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white"></textarea>
+          </div>
+          <div class="col-span-full flex items-center gap-2">
+            <input type="checkbox" id="rmAvailable" checked class="w-4 h-4 accent-emerald-600" />
+            <label for="rmAvailable" class="text-xs font-semibold text-slate-700">Room is currently available for booking</label>
           </div>
         </div>
-      ` : `
-        <div id="roomsListGrid" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
 
-        <!-- Inline Add / Edit Room Panel -->
-        <div id="roomEditorPanel" class="hidden rounded-xl border border-slate-200 bg-slate-50/80 p-5 space-y-4">
-          <div class="flex items-center justify-between pb-2 border-b border-slate-200">
-            <h3 id="roomEditorTitle" class="font-bold text-slate-800 text-sm">Add New Room</h3>
-            <button type="button" onclick="closeRoomEditor()" class="text-xs text-slate-500 hover:text-slate-800 font-semibold"><i class="fas fa-times mr-1"></i>Close</button>
+        <!-- Room Photos -->
+        <div class="space-y-2.5 pt-2 border-t border-slate-200">
+          <div class="flex items-center justify-between">
+            <p class="text-xs font-bold uppercase tracking-wide text-slate-700"><i class="fas fa-camera mr-1 text-amber-600"></i>Room Photos <span class="text-slate-400 font-normal normal-case">(saved to database &amp; shown on property page)</span></p>
+            <span id="rmImgCount" class="text-xs text-slate-500 font-medium">0 photos</span>
           </div>
-
-          <input type="hidden" id="rmEditId" value="" />
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label class="block text-xs font-semibold text-slate-600 mb-1">Room / Suite Name <span class="text-red-500">*</span></label>
-              <input type="text" id="rmName" placeholder="e.g. Executive King Suite" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white" />
-            </div>
-            <div>
-              <label class="block text-xs font-semibold text-slate-600 mb-1">Room Type</label>
-              <select id="rmType" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white">
-                <option value="Studio">Studio</option>
-                <option value="Deluxe Room">Deluxe Room</option>
-                <option value="Executive Suite">Executive Suite</option>
-                <option value="1-Bedroom Suite">1-Bedroom Suite</option>
-                <option value="2-Bedroom Apartment">2-Bedroom Apartment</option>
-                <option value="3-Bedroom Apartment">3-Bedroom Apartment</option>
-                <option value="Penthouse Suite">Penthouse Suite</option>
-                <option value="Room">Room</option>
-              </select>
-            </div>
-            <div>
-              <label class="block text-xs font-semibold text-slate-600 mb-1">Price Per Night (₦)</label>
-              <input type="number" id="rmPrice" min="0" placeholder="e.g. 95000" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white" />
-            </div>
-            <div class="grid grid-cols-3 gap-2">
-              <div><label class="block text-xs font-semibold text-slate-600 mb-1">Guests</label><input type="number" id="rmGuests" min="1" value="2" class="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-sm bg-white" /></div>
-              <div><label class="block text-xs font-semibold text-slate-600 mb-1">Beds</label><input type="number" id="rmBeds" min="0" value="1" class="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-sm bg-white" /></div>
-              <div><label class="block text-xs font-semibold text-slate-600 mb-1">Baths</label><input type="number" id="rmBaths" min="0" value="1" class="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-sm bg-white" /></div>
-            </div>
-            <div class="col-span-full">
-              <label class="block text-xs font-semibold text-slate-600 mb-1">Room Description</label>
-              <textarea id="rmDesc" rows="2" placeholder="Highlight room views, bed size, workspace, balcony..." class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white"></textarea>
-            </div>
-            <div class="col-span-full">
-              <label class="block text-xs font-semibold text-slate-600 mb-1">Room Amenities <span class="text-slate-400 font-normal">(one per line)</span></label>
-              <textarea id="rmAmenities" rows="2" placeholder="King Bed&#10;Smart TV&#10;En-suite Bath&#10;High-speed WiFi" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white"></textarea>
-            </div>
-            <div class="col-span-full flex items-center gap-2">
-              <input type="checkbox" id="rmAvailable" checked class="w-4 h-4 accent-emerald-600" />
-              <label for="rmAvailable" class="text-xs font-semibold text-slate-700">Room is currently available for booking</label>
-            </div>
-          </div>
-
-          <!-- Room Photos -->
-          <div class="space-y-2.5 pt-2 border-t border-slate-200">
-            <div class="flex items-center justify-between">
-              <p class="text-xs font-bold uppercase tracking-wide text-slate-700"><i class="fas fa-camera mr-1 text-amber-600"></i>Room Photos</p>
-              <span id="rmImgCount" class="text-xs text-slate-500 font-medium">0 photos</span>
-            </div>
-            <input type="file" id="roomImgFileInput" accept="image/*" multiple class="hidden" />
-            <input type="file" id="roomImgReplaceInput" accept="image/*" class="hidden" />
-            <div class="upload-zone" id="roomImgDropzone" style="padding:16px;">
-              <p class="text-xs font-semibold text-slate-700">Drag room photos here or click to upload</p>
-              <button type="button" id="chooseRoomImgsBtn" class="mt-2 px-3 py-1.5 rounded-lg text-xs font-semibold text-white" style="background:#0B1F3A;">
-                <i class="fas fa-upload mr-1"></i>Upload Room Photos
-              </button>
-            </div>
-            <div id="roomImgStatus" class="hidden">
-              <div class="prog-bar"><div id="roomImgFill" class="prog-fill"></div></div>
-              <p id="roomImgMsg" class="prog-text">Uploading room photo…</p>
-            </div>
-            <div id="roomImgGrid" class="room-media-grid"></div>
-          </div>
-
-          <div class="flex items-center justify-end gap-2 pt-2">
-            <button type="button" onclick="closeRoomEditor()" class="px-4 py-2 rounded-lg text-xs font-semibold bg-slate-200 text-slate-700 hover:bg-slate-300">Cancel</button>
-            <button type="button" id="saveRoomBtn" onclick="saveRoomRecord()" class="px-5 py-2 rounded-lg text-xs font-semibold text-white btn-gold">
-              <i class="fas fa-check mr-1"></i>Save Room
+          <input type="file" id="roomImgFileInput" accept="image/*" multiple class="hidden" />
+          <input type="file" id="roomImgReplaceInput" accept="image/*" class="hidden" />
+          <div class="upload-zone" id="roomImgDropzone" style="padding:16px;">
+            <p class="text-xs font-semibold text-slate-700">Drag room photos here or click to upload</p>
+            <button type="button" id="chooseRoomImgsBtn" class="mt-2 px-3 py-1.5 rounded-lg text-xs font-semibold text-white" style="background:#0B1F3A;">
+              <i class="fas fa-upload mr-1"></i>Upload Room Photos
             </button>
           </div>
+          <div id="roomImgStatus" class="hidden">
+            <div class="prog-bar"><div id="roomImgFill" class="prog-fill"></div></div>
+            <p id="roomImgMsg" class="prog-text">Uploading room photo…</p>
+          </div>
+          <div id="roomImgGrid" class="room-media-grid"></div>
+          <details class="text-xs">
+            <summary class="cursor-pointer text-slate-500 hover:text-slate-800 select-none font-medium">＋ Add room photo by URL instead</summary>
+            <div class="mt-2 flex gap-2">
+              <textarea id="rmUrlPasteArea" rows="2" placeholder="https://example.com/room.jpg&#10;(one URL per line)" class="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono bg-white focus:outline-none"></textarea>
+              <button type="button" onclick="addRoomUrlImages()" class="self-end text-xs bg-slate-800 text-white px-3 py-1.5 rounded-lg hover:bg-slate-900 font-semibold">Add URL</button>
+            </div>
+          </details>
         </div>
-      `}
+
+        <div class="flex items-center justify-end gap-2 pt-2">
+          <button type="button" onclick="closeRoomEditor()" class="px-4 py-2 rounded-lg text-xs font-semibold bg-slate-200 text-slate-700 hover:bg-slate-300">Cancel</button>
+          <button type="button" id="saveRoomBtn" onclick="saveRoomRecord()" class="px-5 py-2 rounded-lg text-xs font-semibold text-white btn-gold">
+            <i class="fas fa-check mr-1"></i>Save Room
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -9918,8 +11363,8 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
               '<p class="text-xs text-slate-500 mt-1">' + rm.max_guests + ' Guests · ' + rm.bedrooms + ' Bed · ' + rm.bathrooms + ' Bath</p>' +
             '</div>' +
             '<div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">' +
-              '<button type="button" onclick="openEditRoom(' + rm.id + ')" class="px-3 py-1 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200"><i class="fas fa-edit mr-1"></i>Edit &amp; Photos</button>' +
-              '<button type="button" onclick="deleteRoomRecord(' + rm.id + ', this)" class="px-3 py-1 rounded-lg text-xs font-semibold bg-red-50 text-red-600 hover:bg-red-100"><i class="fas fa-trash-alt mr-1"></i>Delete</button>' +
+              '<button type="button" onclick="openEditRoom(\'' + String(rm.id).replace(/'/g, '') + '\')" class="px-3 py-1 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200"><i class="fas fa-edit mr-1"></i>Edit &amp; Photos</button>' +
+              '<button type="button" onclick="deleteRoomRecord(\'' + String(rm.id).replace(/'/g, '') + '\', this)" class="px-3 py-1 rounded-lg text-xs font-semibold bg-red-50 text-red-600 hover:bg-red-100"><i class="fas fa-trash-alt mr-1"></i>Delete</button>' +
             '</div>' +
           '</div>';
         card.querySelector('.bg-slate-900\\/80').textContent = rm.room_type || 'Room';
@@ -9959,19 +11404,56 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
       });
     }
 
+    async function syncRoomImagesToServer(toastText) {
+      var editId = (document.getElementById('rmEditId')?.value || '').trim();
+      if (!IS_EDIT || !PROP_ID || !editId || String(editId).startsWith('tmp_')) return;
+      var urls = activeRoomImages.filter(function(i) { return !i.uploading && i.url && !i.url.startsWith('blob:'); }).map(function(i) { return i.url; });
+      try {
+        var res = await fetch('/api/rooms/' + editId + '/images/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ images: urls })
+        });
+        var data = await res.json();
+        if (data.success) {
+          roomsList = roomsList.map(function(r) {
+            return String(r.id) === String(editId) ? Object.assign({}, r, { images: urls }) : r;
+          });
+          renderRoomsList();
+          if (toastText) showToast(toastText, 'ok');
+        } else if (toastText) {
+          showToast(data.error || 'Could not sync room photos.', 'error');
+        }
+      } catch(_) {}
+    }
+
     window.triggerReplaceRoomImg = function(idx) {
       roomReplaceTargetIdx = idx;
       var inp = document.getElementById('roomImgReplaceInput');
       if (inp) { inp.value = ''; inp.click(); }
     };
-    window.setRoomImgFirst = function(idx) {
+    window.setRoomImgFirst = async function(idx) {
       var item = activeRoomImages.splice(idx, 1)[0];
       activeRoomImages.unshift(item);
       renderRoomImgGrid();
+      await syncRoomImagesToServer('Room cover photo updated.');
     };
-    window.removeRoomImg = function(idx) {
+    window.removeRoomImg = async function(idx) {
       activeRoomImages.splice(idx, 1);
       renderRoomImgGrid();
+      await syncRoomImagesToServer('Room photo removed.');
+    };
+    window.addRoomUrlImages = async function() {
+      var ta = document.getElementById('rmUrlPasteArea');
+      if (!ta) return;
+      var lines = ta.value.split('\\n').map(function(s) { return s.trim(); }).filter(function(s) { return s.startsWith('http') || s.startsWith('/'); });
+      if (!lines.length) { showToast('Paste at least one valid image URL.', 'warn'); return; }
+      lines.forEach(function(u) {
+        if (!activeRoomImages.find(function(i) { return i.url === u; })) activeRoomImages.push({ url: u });
+      });
+      ta.value = '';
+      renderRoomImgGrid();
+      await syncRoomImagesToServer('Room image URL(s) added & synced.');
     };
 
     async function uploadRoomImageFile(file, replaceIdx) {
@@ -9988,9 +11470,17 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
       if (isReplace) activeRoomImages[idx] = { url: localUrl, uploading: true };
       else activeRoomImages.push({ url: localUrl, uploading: true });
       renderRoomImgGrid();
-      showStatus(st, fl, mg, 60, 'Uploading room photo…');
+      showStatus(st, fl, mg, 60, 'Saving room photo to database…');
       var fd = new FormData();
       fd.append('image', readyFile);
+      var rmEditId = (document.getElementById('rmEditId')?.value || '').trim();
+      if (IS_EDIT && PROP_ID) {
+        fd.append('property_id', PROP_ID);
+        if (rmEditId && !String(rmEditId).startsWith('tmp_')) {
+          fd.append('room_id', rmEditId);
+          if (isReplace) fd.append('replace_index', String(idx));
+        }
+      }
       try {
         var res = await fetch('/api/upload-image', { method: 'POST', body: fd });
         var data = await res.json();
@@ -9998,8 +11488,15 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
           activeRoomImages[idx] = { url: data.url };
           URL.revokeObjectURL(localUrl);
           renderRoomImgGrid();
-          showStatus(st, fl, mg, 100, 'Room photo uploaded ✓ — click Save Room to persist.');
-          showToast('Room photo uploaded! Click Save Room to persist.', 'ok');
+          var syncedDirect = IS_EDIT && PROP_ID && rmEditId && !String(rmEditId).startsWith('tmp_');
+          if (syncedDirect) {
+            await syncRoomImagesToServer();
+            showStatus(st, fl, mg, 100, 'Room photo saved to database ✓');
+            showToast('Room photo saved to database!', 'ok');
+          } else {
+            showStatus(st, fl, mg, 100, 'Room photo uploaded to DB ✓ — click Save Room.');
+            showToast('Room photo uploaded to DB! Click Save Room to attach it.', 'ok');
+          }
         } else {
           if (isReplace && prev) activeRoomImages[idx] = prev;
           else activeRoomImages.splice(idx, 1);
@@ -10043,7 +11540,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
     };
 
     window.openEditRoom = function(roomId) {
-      var rm = roomsList.find(function(r) { return r.id === roomId; });
+      var rm = roomsList.find(function(r) { return String(r.id) === String(roomId); });
       if (rm) openRoomEditor(rm);
     };
 
@@ -10051,6 +11548,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
       var roomName = (document.getElementById('rmName').value || '').trim();
       if (!roomName) { showToast('Room name is required.', 'warn'); return; }
       var editId = (document.getElementById('rmEditId').value || '').trim();
+      var cleanImages = activeRoomImages.filter(function(i) { return !i.uploading && i.url && !i.url.startsWith('blob:'); }).map(function(i) { return i.url; });
       var payload = {
         room_name: roomName,
         room_type: document.getElementById('rmType').value || 'Room',
@@ -10060,14 +11558,27 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         bedrooms: parseInt(document.getElementById('rmBeds').value || '1') || 1,
         bathrooms: parseInt(document.getElementById('rmBaths').value || '1') || 1,
         amenities: (document.getElementById('rmAmenities').value || '').split('\\n').map(function(s) { return s.trim(); }).filter(Boolean),
-        images: activeRoomImages.filter(function(i) { return !i.uploading && i.url && !i.url.startsWith('blob:'); }).map(function(i) { return i.url; }),
+        images: cleanImages,
         is_available: document.getElementById('rmAvailable').checked ? 1 : 0,
         sort_order: roomsList.length
       };
+      if (!IS_EDIT || !PROP_ID) {
+        var queued = normalizeRoom(Object.assign({}, payload, { id: editId || ('tmp_' + Date.now()) }));
+        if (editId) {
+          roomsList = roomsList.map(function(r) { return String(r.id) === String(editId) ? queued : r; });
+        } else {
+          roomsList.push(queued);
+        }
+        renderRoomsList();
+        window.closeRoomEditor();
+        showToast('Room queued! Click Save Property to publish.', 'ok');
+        return;
+      }
       var btn = document.getElementById('saveRoomBtn');
       if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Saving…'; }
       try {
-        var endpoint = editId ? ('/api/rooms/' + editId + '/update') : ('/api/properties/' + PROP_ID + '/rooms');
+        var isExistingDbRoom = editId && !String(editId).startsWith('tmp_');
+        var endpoint = isExistingDbRoom ? ('/api/rooms/' + editId + '/update') : ('/api/properties/' + PROP_ID + '/rooms');
         var res = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -10076,14 +11587,14 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         var data = await res.json();
         if (data.success && data.room) {
           var saved = normalizeRoom(data.room);
-          if (editId) {
-            roomsList = roomsList.map(function(r) { return r.id === saved.id ? saved : r; });
+          if (isExistingDbRoom) {
+            roomsList = roomsList.map(function(r) { return String(r.id) === String(saved.id) ? saved : r; });
           } else {
             roomsList.push(saved);
           }
           renderRoomsList();
           window.closeRoomEditor();
-          showToast(editId ? 'Room updated & saved!' : 'Room added & saved!', 'ok');
+          showToast(isExistingDbRoom ? 'Room updated & saved!' : 'Room added & saved!', 'ok');
         } else {
           showToast(data.error || 'Could not save room.', 'error');
         }
@@ -10100,11 +11611,17 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         setTimeout(function() { if (btn) { delete btn.dataset.armed; btn.innerHTML = '<i class="fas fa-trash-alt mr-1"></i>Delete'; } }, 3200);
         return;
       }
+      if (!IS_EDIT || String(roomId).startsWith('tmp_')) {
+        roomsList = roomsList.filter(function(r) { return String(r.id) !== String(roomId); });
+        renderRoomsList();
+        showToast('Queued room removed.', 'ok');
+        return;
+      }
       try {
         var res = await fetch('/api/rooms/' + roomId + '/delete', { method: 'POST' });
         var data = await res.json();
         if (data.success) {
-          roomsList = roomsList.filter(function(r) { return r.id !== roomId; });
+          roomsList = roomsList.filter(function(r) { return String(r.id) !== String(roomId); });
           renderRoomsList();
           showToast('Room deleted.', 'ok');
         } else {
@@ -10115,47 +11632,49 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
       }
     };
 
-    if (IS_EDIT) {
-      renderRoomsList();
-      var openNewRoomBtn = document.getElementById('openNewRoomBtn');
-      if (openNewRoomBtn) openNewRoomBtn.addEventListener('click', function() { openRoomEditor(null); });
-      var roomDrop = document.getElementById('roomImgDropzone');
-      var roomFileInp = document.getElementById('roomImgFileInput');
-      var roomReplaceInp = document.getElementById('roomImgReplaceInput');
-      var chooseRoomBtn = document.getElementById('chooseRoomImgsBtn');
-      if (chooseRoomBtn && roomFileInp) chooseRoomBtn.addEventListener('click', function(e) { e.stopPropagation(); roomFileInp.click(); });
-      if (roomDrop && roomFileInp) {
-        roomDrop.addEventListener('click', function(e) { if (e.target && e.target.closest('button')) return; roomFileInp.click(); });
-        roomDrop.addEventListener('dragover', function(e) { e.preventDefault(); roomDrop.classList.add('drag-over'); });
-        roomDrop.addEventListener('dragleave', function() { roomDrop.classList.remove('drag-over'); });
-        roomDrop.addEventListener('drop', async function(e) {
-          e.preventDefault(); roomDrop.classList.remove('drag-over');
-          var files = Array.from(e.dataTransfer.files || []).filter(function(f) { return f.type.startsWith('image/'); });
-          for (var i = 0; i < files.length; i++) await uploadRoomImageFile(files[i]);
-        });
-      }
-      if (roomFileInp) {
-        roomFileInp.addEventListener('change', async function(e) {
-          var files = Array.from(e.target.files || []);
-          for (var i = 0; i < files.length; i++) await uploadRoomImageFile(files[i]);
-          e.target.value = '';
-        });
-      }
-      if (roomReplaceInp) {
-        roomReplaceInp.addEventListener('change', async function(e) {
-          var file = (e.target.files || [])[0];
-          var idx = roomReplaceTargetIdx;
-          roomReplaceTargetIdx = -1;
-          e.target.value = '';
-          if (file && idx >= 0) await uploadRoomImageFile(file, idx);
-        });
-      }
+    renderRoomsList();
+    var openNewRoomBtn = document.getElementById('openNewRoomBtn');
+    if (openNewRoomBtn) openNewRoomBtn.addEventListener('click', function() { openRoomEditor(null); });
+    var roomDrop = document.getElementById('roomImgDropzone');
+    var roomFileInp = document.getElementById('roomImgFileInput');
+    var roomReplaceInp = document.getElementById('roomImgReplaceInput');
+    var chooseRoomBtn = document.getElementById('chooseRoomImgsBtn');
+    if (chooseRoomBtn && roomFileInp) chooseRoomBtn.addEventListener('click', function(e) { e.stopPropagation(); roomFileInp.click(); });
+    if (roomDrop && roomFileInp) {
+      roomDrop.addEventListener('click', function(e) { if (e.target && e.target.closest('button')) return; roomFileInp.click(); });
+      roomDrop.addEventListener('dragover', function(e) { e.preventDefault(); roomDrop.classList.add('drag-over'); });
+      roomDrop.addEventListener('dragleave', function() { roomDrop.classList.remove('drag-over'); });
+      roomDrop.addEventListener('drop', async function(e) {
+        e.preventDefault(); roomDrop.classList.remove('drag-over');
+        var files = Array.from(e.dataTransfer.files || []).filter(function(f) { return f.type.startsWith('image/'); });
+        for (var i = 0; i < files.length; i++) await uploadRoomImageFile(files[i]);
+      });
+    }
+    if (roomFileInp) {
+      roomFileInp.addEventListener('change', async function(e) {
+        var files = Array.from(e.target.files || []);
+        for (var i = 0; i < files.length; i++) await uploadRoomImageFile(files[i]);
+        e.target.value = '';
+      });
+    }
+    if (roomReplaceInp) {
+      roomReplaceInp.addEventListener('change', async function(e) {
+        var file = (e.target.files || [])[0];
+        var idx = roomReplaceTargetIdx;
+        roomReplaceTargetIdx = -1;
+        e.target.value = '';
+        if (file && idx >= 0) await uploadRoomImageFile(file, idx);
+      });
     }
 
     // ── FORM SUBMIT ─────────────────────────────────────────────────
     window.beforeSubmit = function() {
       syncImgRaw();
       document.getElementById('pendingVideoIds').value = pendingVidIds.join(',');
+      var pendingRoomsEl = document.getElementById('pendingRoomsJson');
+      if (pendingRoomsEl && !IS_EDIT) {
+        pendingRoomsEl.value = JSON.stringify(roomsList || []);
+      }
       var btn = document.getElementById('submitBtn');
       if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Saving…'; }
       if (!IS_EDIT && DRAFT_KEY) {
@@ -10255,24 +11774,72 @@ function adminInquiriesPage(inquiries: any[]): string {
 }
 
 function adminBookingsPage(bookings: any[]): string {
+  const addonLabels: Record<string, string> = {
+    airport_pickup: 'Airport Pickup',
+    early_late: 'Early/Late Check-out',
+    breakfast_chef: 'Breakfast Chef',
+    laundry: 'Housekeeping & Laundry'
+  }
   const content = `
   <div class="bg-white rounded-xl shadow-sm overflow-hidden">
-    <div class="px-6 py-4 border-b"><p class="text-sm text-gray-500">${bookings.length} total bookings</p></div>
+    <div class="px-6 py-4 border-b flex items-center justify-between">
+      <p class="text-sm text-gray-500">${bookings.length} total bookings</p>
+      <span class="text-xs text-slate-400">Room selection, concierge add-ons, promos &amp; arrival details shown inline</span>
+    </div>
     ${bookings.length > 0 ? `
     <div class="overflow-x-auto">
       <table class="w-full text-sm">
-        <thead class="bg-gray-50 text-gray-500 text-xs uppercase"><tr><th class="px-4 py-3 text-left">Ref</th><th class="px-4 py-3 text-left">Guest</th><th class="px-4 py-3 text-left">Property</th><th class="px-4 py-3 text-left">Dates</th><th class="px-4 py-3 text-right">Total</th><th class="px-4 py-3 text-center">Status</th><th class="px-4 py-3 text-center">Action</th></tr></thead>
+        <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+          <tr>
+            <th class="px-4 py-3 text-left">Ref</th>
+            <th class="px-4 py-3 text-left">Guest &amp; Arrival</th>
+            <th class="px-4 py-3 text-left">Residence &amp; Room</th>
+            <th class="px-4 py-3 text-left">Stay &amp; Add-ons</th>
+            <th class="px-4 py-3 text-right">Pricing &amp; Payment</th>
+            <th class="px-4 py-3 text-center">Status</th>
+            <th class="px-4 py-3 text-center">Action</th>
+          </tr>
+        </thead>
         <tbody class="divide-y">
-          ${bookings.map((b: any) => `
-          <tr class="hover:bg-gray-50">
-            <td class="px-4 py-3 font-mono text-xs text-gray-600">${b.booking_ref}</td>
-            <td class="px-4 py-3"><p class="font-medium text-gray-800">${b.guest_name}</p><p class="text-xs text-gray-500">${b.guest_phone}</p></td>
-            <td class="px-4 py-3 text-gray-500 text-xs max-w-[100px] truncate">${b.property_title||b.property_listing_id}</td>
-            <td class="px-4 py-3 text-gray-500 text-xs">${b.checkin_date} → ${b.checkout_date}<br/>${b.nights} nights, ${b.guests} guest${b.guests>1?'s':''}</td>
-            <td class="px-4 py-3 text-right font-semibold" style="color: var(--navy);">₦${(b.total_price||0).toLocaleString()}</td>
-            <td class="px-4 py-3 text-center"><span class="text-xs px-2 py-1 rounded-full ${b.status==='confirmed'?'bg-emerald-100 text-emerald-700':b.status==='cancelled'?'bg-red-100 text-red-700':'bg-yellow-100 text-yellow-700'}">${b.status}</span></td>
+          ${bookings.map((b: any) => {
+            let parsedAddons: any[] = []
+            try { parsedAddons = JSON.parse(b.addons || '[]') } catch { parsedAddons = [] }
+            const addonText = (Array.isArray(parsedAddons) ? parsedAddons : [])
+              .map((k: any) => typeof k === 'string' ? (addonLabels[k] || k) : (k?.label || addonLabels[k?.key] || k?.key || ''))
+              .filter(Boolean)
+              .join(', ')
+            const guestBreak = (b.adults || b.children)
+              ? `${b.adults || b.guests || 1} adult${(b.adults || 1) > 1 ? 's' : ''}${b.children ? `, ${b.children} child${b.children > 1 ? 'ren' : ''}` : ''}`
+              : `${b.guests || 1} guest${(b.guests || 1) > 1 ? 's' : ''}`
+            const pmLabel = b.payment_method ? String(b.payment_method).replace(/_/g, ' ') : ''
+            return `
+          <tr class="hover:bg-gray-50 align-top">
+            <td class="px-4 py-3 font-mono text-xs text-gray-600 whitespace-nowrap">${escHtml(b.booking_ref || '')}</td>
+            <td class="px-4 py-3">
+              <p class="font-medium text-gray-800">${escHtml(b.guest_name || '')}</p>
+              <p class="text-xs text-gray-500">${escHtml(b.guest_phone || '')}</p>
+              ${b.arrival_time ? `<p class="text-[11px] text-slate-500 mt-1"><i class="fas fa-clock mr-1 text-amber-600"></i>${escHtml(b.arrival_time)}</p>` : ''}
+              ${b.stay_purpose ? `<p class="text-[11px] text-slate-400">${escHtml(b.stay_purpose)}</p>` : ''}
+            </td>
+            <td class="px-4 py-3 text-xs max-w-[190px]">
+              <p class="font-semibold text-slate-800 truncate">${escHtml(b.property_title || b.property_listing_id || '')}</p>
+              ${b.room_name ? `<p class="text-[11px] font-semibold text-violet-700 mt-0.5"><i class="fas fa-bed mr-1"></i>${escHtml(b.room_name)}</p>` : '<p class="text-[11px] text-slate-400">Entire Residence</p>'}
+            </td>
+            <td class="px-4 py-3 text-gray-600 text-xs">
+              <p class="font-medium text-slate-700">${escHtml(b.checkin_date || '')} → ${escHtml(b.checkout_date || '')}</p>
+              <p class="text-slate-500">${b.nights || 1} night${(b.nights || 1) > 1 ? 's' : ''} · ${guestBreak}</p>
+              ${addonText ? `<p class="text-[11px] text-emerald-700 mt-1"><i class="fas fa-concierge-bell mr-1"></i>${escHtml(addonText)}</p>` : ''}
+              ${b.special_requests ? `<p class="text-[11px] text-slate-400 italic mt-0.5 max-w-[200px] truncate" title="${escHtml(b.special_requests)}">"${escHtml(b.special_requests)}"</p>` : ''}
+            </td>
+            <td class="px-4 py-3 text-right whitespace-nowrap">
+              <p class="font-semibold tabular-nums" style="color: var(--navy);">₦${(b.total_price || 0).toLocaleString()}</p>
+              ${b.addons_total ? `<p class="text-[11px] text-slate-500">+₦${Number(b.addons_total).toLocaleString()} add-ons</p>` : ''}
+              ${b.discount_amount ? `<p class="text-[11px] text-emerald-600">-₦${Number(b.discount_amount).toLocaleString()} (${escHtml(b.promo_code || 'PROMO')})</p>` : ''}
+              ${pmLabel ? `<p class="text-[10px] uppercase tracking-wider text-slate-400 mt-0.5">${escHtml(pmLabel)}</p>` : ''}
+            </td>
+            <td class="px-4 py-3 text-center"><span class="text-xs px-2 py-1 rounded-full ${b.status==='confirmed'?'bg-emerald-100 text-emerald-700':b.status==='cancelled'?'bg-red-100 text-red-700':'bg-yellow-100 text-yellow-700'}">${escHtml(b.status || 'pending')}</span></td>
             <td class="px-4 py-3 text-center"><form method="POST" action="/admin/bookings/${b.id}/status" class="inline-flex gap-1"><select name="status" class="text-xs border rounded px-2 py-1 focus:outline-none"><option value="pending" ${b.status==='pending'?'selected':''}>Pending</option><option value="confirmed" ${b.status==='confirmed'?'selected':''}>Confirmed</option><option value="cancelled" ${b.status==='cancelled'?'selected':''}>Cancelled</option><option value="completed" ${b.status==='completed'?'selected':''}>Completed</option></select><button type="submit" class="text-xs bg-gray-800 text-white px-2 py-1 rounded">Set</button></form></td>
-          </tr>`).join('')}
+          </tr>`}).join('')}
         </tbody>
       </table>
     </div>` : '<div class="text-center py-16 text-gray-400"><i class="fas fa-calendar-times text-4xl mb-3 block"></i><p>No bookings yet</p></div>'}

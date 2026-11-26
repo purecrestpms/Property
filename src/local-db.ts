@@ -217,6 +217,106 @@ function initializeSchemaAndSeed(sqlite: DatabaseSync): void {
       sqlite.prepare(`INSERT OR IGNORE INTO _local_migrations (name) VALUES (?)`).run(seedMarker)
     }
   }
+
+  // Persist generated local images as binary BLOBs in media_uploads so DB image storage is populated
+  const mediaBlobMarker = '__generated_media_blobs_v1__'
+  const blobsSeeded = sqlite
+    .prepare(`SELECT name FROM _local_migrations WHERE name = ?`)
+    .get(mediaBlobMarker)
+  if (!blobsSeeded) {
+    try {
+      const richgateProp = sqlite
+        .prepare(`SELECT id FROM properties WHERE listing_id = 'PC-ENUGU-01'`)
+        .get() as { id: number } | undefined
+      const assetsDir = path.resolve(process.cwd(), 'src/assets/images')
+      if (fs.existsSync(assetsDir)) {
+        const imgFiles = fs.readdirSync(assetsDir).filter((f) => /\.(jpe?g|png|webp)$/i.test(f))
+        const insertStmt = sqlite.prepare(
+          `INSERT INTO media_uploads (uploader_type, property_id, file_name, file_type, mime_type, file_url, image_blob, file_size) VALUES ('admin', ?, ?, 'image', ?, ?, ?, ?)`
+        )
+        for (const imgFile of imgFiles) {
+          const publicUrl = `/src/assets/images/${imgFile}`
+          const exists = sqlite
+            .prepare(`SELECT id FROM media_uploads WHERE file_url = ?`)
+            .get(publicUrl)
+          if (exists) continue
+          const fullPath = path.join(assetsDir, imgFile)
+          const buf = fs.readFileSync(fullPath)
+          const ext = path.extname(imgFile).toLowerCase()
+          const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg'
+          const propId = imgFile.startsWith('richgate_') && richgateProp ? richgateProp.id : null
+          insertStmt.run(propId, imgFile, mime, publicUrl, new Uint8Array(buf), buf.byteLength)
+        }
+      }
+      sqlite.prepare(`INSERT OR IGNORE INTO _local_migrations (name) VALUES (?)`).run(mediaBlobMarker)
+    } catch (err) {
+      console.warn('[PureCrest DB] Media BLOB seed skipped:', err)
+    }
+  }
+
+  // Persist user-attached Richgate /public/assets/aistudio/* images into media_uploads BLOBs + property_room_images
+  const richgateAssetsMarker = '__richgate_uploaded_assets_v2__'
+  const richgateAssetsSeeded = sqlite
+    .prepare(`SELECT name FROM _local_migrations WHERE name = ?`)
+    .get(richgateAssetsMarker)
+  if (!richgateAssetsSeeded) {
+    try {
+      const richgateProp = sqlite
+        .prepare(`SELECT id FROM properties WHERE listing_id = 'PC-ENUGU-01'`)
+        .get() as { id: number } | undefined
+      const uploadedDir = path.resolve(process.cwd(), 'public/assets/aistudio')
+      const urlToMediaId = new Map<string, number>()
+
+      if (fs.existsSync(uploadedDir)) {
+        const files = fs.readdirSync(uploadedDir).filter((f) => /\.(jpe?g|png|webp)$/i.test(f))
+        const insertStmt = sqlite.prepare(
+          `INSERT INTO media_uploads (uploader_type, property_id, file_name, file_type, mime_type, file_url, image_blob, file_size) VALUES ('admin', ?, ?, 'image', ?, ?, ?, ?)`
+        )
+        for (const f of files) {
+          const publicUrl = `/assets/aistudio/${f}`
+          const existing = sqlite
+            .prepare(`SELECT id FROM media_uploads WHERE file_url = ?`)
+            .get(publicUrl) as { id: number } | undefined
+          if (existing?.id) {
+            urlToMediaId.set(publicUrl, existing.id)
+            continue
+          }
+          const fullPath = path.join(uploadedDir, f)
+          const buf = fs.readFileSync(fullPath)
+          const ext = path.extname(f).toLowerCase()
+          const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg'
+          const info = insertStmt.run(richgateProp?.id ?? null, f, mime, publicUrl, new Uint8Array(buf), buf.byteLength)
+          urlToMediaId.set(publicUrl, Number(info.lastInsertRowid))
+        }
+      }
+
+      if (richgateProp?.id) {
+        const rooms = sqlite
+          .prepare(`SELECT id, images FROM property_rooms WHERE property_id = ?`)
+          .all(richgateProp.id) as Array<{ id: number; images: string }>
+        const linkStmt = sqlite.prepare(
+          `INSERT INTO property_room_images (room_id, property_id, media_id, image_url, sort_order) VALUES (?,?,?,?,?)`
+        )
+        for (const rm of rooms) {
+          let imgs: string[] = []
+          try { imgs = JSON.parse(rm.images || '[]') } catch { imgs = [] }
+          for (let i = 0; i < imgs.length; i++) {
+            const url = imgs[i]
+            const existingLink = sqlite
+              .prepare(`SELECT id FROM property_room_images WHERE room_id = ? AND image_url = ?`)
+              .get(rm.id, url)
+            if (!existingLink) {
+              linkStmt.run(rm.id, richgateProp.id, urlToMediaId.get(url) ?? null, url, i)
+            }
+          }
+        }
+      }
+
+      sqlite.prepare(`INSERT OR IGNORE INTO _local_migrations (name) VALUES (?)`).run(richgateAssetsMarker)
+    } catch (err) {
+      console.warn('[PureCrest DB] Richgate attached assets seed skipped:', err)
+    }
+  }
 }
 
 export function getLocalDb(): D1Database {
