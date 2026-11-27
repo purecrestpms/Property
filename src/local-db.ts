@@ -226,7 +226,7 @@ function initializeSchemaAndSeed(sqlite: DatabaseSync): void {
   if (!blobsSeeded) {
     try {
       const richgateProp = sqlite
-        .prepare(`SELECT id FROM properties WHERE listing_id = 'PC-ENUGU-01'`)
+        .prepare(`SELECT id FROM properties WHERE listing_id IN ('richgate-apartments-enugu', 'PC-ENUGU-01') LIMIT 1`)
         .get() as { id: number } | undefined
       const assetsDir = path.resolve(process.cwd(), 'src/assets/images')
       if (fs.existsSync(assetsDir)) {
@@ -255,14 +255,14 @@ function initializeSchemaAndSeed(sqlite: DatabaseSync): void {
   }
 
   // Persist user-attached Richgate /public/assets/aistudio/* images into media_uploads BLOBs + property_room_images
-  const richgateAssetsMarker = '__richgate_uploaded_assets_v2__'
+  const richgateAssetsMarker = '__uploaded_assets_v3__'
   const richgateAssetsSeeded = sqlite
     .prepare(`SELECT name FROM _local_migrations WHERE name = ?`)
     .get(richgateAssetsMarker)
   if (!richgateAssetsSeeded) {
     try {
       const richgateProp = sqlite
-        .prepare(`SELECT id FROM properties WHERE listing_id = 'PC-ENUGU-01'`)
+        .prepare(`SELECT id FROM properties WHERE listing_id IN ('richgate-apartments-enugu', 'PC-ENUGU-01') LIMIT 1`)
         .get() as { id: number } | undefined
       const uploadedDir = path.resolve(process.cwd(), 'public/assets/aistudio')
       const urlToMediaId = new Map<string, number>()

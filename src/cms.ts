@@ -5,7 +5,6 @@ export interface CmsField {
   key: string
   label: string
   type: 'text' | 'textarea' | 'url' | 'image' | 'toggle'
-  placeholder?: string
   defaultVal: string
   help?: string
 }
@@ -52,15 +51,14 @@ export const CMS_TABS: CmsTab[] = [
       { key: 'whatwedo_body', label: 'What We Do — Description', type: 'textarea', defaultVal: 'Purecrest is a dynamic company providing end-to-end solutions in hospitality and real estate. From premium hospitality management to property development and investment advisory, we create spaces and experiences that stand the test of time.' },
       { key: 'service_card_1_title', label: 'Card 1 Title (Hospitality)', type: 'text', defaultVal: 'Purecrest Hospitality' },
       { key: 'service_card_1_desc', label: 'Card 1 Description', type: 'textarea', defaultVal: 'Hotel management, serviced apartments, and short-let operations delivering exceptional guest experiences and maximum owner returns.' },
-      { key: 'service_img_hospitality', label: 'Card 1 Image (Hospitality)', type: 'image', defaultVal: '/static/service-hospitality.jpg' },
       { key: 'service_card_2_title', label: 'Card 2 Title (Property)', type: 'text', defaultVal: 'Purecrest Property' },
       { key: 'service_card_2_desc', label: 'Card 2 Description', type: 'textarea', defaultVal: 'Real estate development, property sales, leasing, and investment advisory creating lasting value across Nigeria.' },
-      { key: 'service_img_property', label: 'Card 2 Image (Property)', type: 'image', defaultVal: '/static/service-property.jpg' },
       { key: 'service_card_3_title', label: 'Card 3 Title (Technology)', type: 'text', defaultVal: 'Pure Crest Technology' },
       { key: 'service_card_3_desc', label: 'Card 3 Description', type: 'textarea', defaultVal: 'Web development, booking systems, and hospitality software powering modern hospitality and property businesses.' },
-      { key: 'service_img_solutions', label: 'Card 3 Image (Technology / Solutions)', type: 'image', defaultVal: '/static/service-solutions.jpg' },
-      { key: 'service_card_4_title', label: 'Wide Card Title (Virtual Support)', type: 'text', defaultVal: 'Hospitality Virtual Support' },
-      { key: 'service_card_4_desc', label: 'Wide Card Description', type: 'textarea', defaultVal: 'Professional remote management for your hospitality business — 24/7 guest support, reservations, revenue management, and operations coordination.' },
+      { key: 'service_img_solutions', label: 'Card 3 Image (Pure Crest Technology)', type: 'image', defaultVal: '/assets/aistudio/3C945DE4-8BB6-448E-8828-635AEAEE8958_d7ecfef0.png' },
+      { key: 'service_card_4_title', label: 'Card 4 Title (Virtual Support)', type: 'text', defaultVal: 'Hospitality Virtual Support' },
+      { key: 'service_card_4_desc', label: 'Card 4 Description', type: 'textarea', defaultVal: 'Professional remote management for your hospitality business — 24/7 guest support, reservations, revenue management, and operations coordination.' },
+      { key: 'service_img_virtual_support', label: 'Card 4 Image (Virtual Support)', type: 'image', defaultVal: '/assets/aistudio/F1834A2C-2DF3-4AEB-8A69-8229BB53CCAC_9dec0e0c.png' },
       { key: 'ota_banner_image', label: 'OTA Listing Optimization Banner Image', type: 'image', defaultVal: '/static/ota-ad-banner.png' },
       { key: 'manage_section_title', label: 'Property Management Section Heading', type: 'text', defaultVal: 'Let Us Manage Your Property' },
       { key: 'manage_section_body', label: 'Property Management Section Copy', type: 'textarea', defaultVal: 'We are an ethical brand built on transparency, integrity, and results. Whether you own a shortlet apartment, serviced residence, or a hotel — we handle everything from marketing, guest management, maintenance to revenue optimisation. Earn more while we manage for you.' },
@@ -85,7 +83,7 @@ export const CMS_TABS: CmsTab[] = [
       { key: 'pms_banner_cta_url', label: 'Primary CTA Destination URL', type: 'url', defaultVal: 'https://pchpms.com', help: 'Links directly to your Hotel PMS product website.' },
       { key: 'pms_banner_secondary_text', label: 'Secondary Button Text', type: 'text', defaultVal: 'Request a Guided Demo' },
       { key: 'pms_banner_secondary_url', label: 'Secondary Button Link', type: 'text', defaultVal: '/contact?service=hospitality-software' },
-      { key: 'pms_banner_image', label: 'PMS Showcase Image', type: 'image', defaultVal: '/static/service-solutions.jpg', help: 'Upload a dashboard screenshot or hotel operations visual.' },
+      { key: 'pms_banner_image', label: 'PMS Showcase Image', type: 'image', defaultVal: '/assets/aistudio/3C945DE4-8BB6-448E-8828-635AEAEE8958_d7ecfef0.png', help: 'Upload a dashboard screenshot or hotel operations visual.' },
       { key: 'pms_feature_1', label: 'Feature Bullet 1', type: 'text', defaultVal: 'Front Desk, Reservations & Instant Check-In' },
       { key: 'pms_feature_2', label: 'Feature Bullet 2', type: 'text', defaultVal: 'Real-Time OTA Channel & Booking Sync' },
       { key: 'pms_feature_3', label: 'Feature Bullet 3', type: 'text', defaultVal: 'Automated Billing, Folios & Housekeeping' },
@@ -97,13 +95,11 @@ export const CMS_TABS: CmsTab[] = [
     label: 'Hospitality',
     icon: 'fa-concierge-bell',
     previewPath: '/hospitality',
-    description: 'Edit headlines, copy, and hero/partner imagery for the Hospitality Management page.',
+    description: 'Edit headlines and copy for the Hospitality Management page.',
     fields: [
       { key: 'hosp_hero_title', label: 'Hero Headline', type: 'textarea', defaultVal: 'Your Property.\nOur Management.\nBetter Hospitality.' },
       { key: 'hosp_hero_subtitle', label: 'Hero Description', type: 'textarea', defaultVal: 'We partner with hotel owners and property investors to professionally manage, reposition, and grow their hospitality assets — delivering world-class guest experiences and maximising owner returns.' },
-      { key: 'hospitality_hero_image', label: 'Hero Background Image', type: 'image', defaultVal: 'https://images.unsplash.com/photo-1566073771259-6a8506099945?w=1400&q=80' },
       { key: 'hosp_services_heading', label: 'Services Section Heading', type: 'text', defaultVal: 'Comprehensive Hospitality Management' },
-      { key: 'hospitality_partner_image', label: 'Partner Showcase Image', type: 'image', defaultVal: 'https://images.unsplash.com/photo-1455587734955-081b22074882?w=900&q=80' },
       { key: 'hosp_cta_title', label: 'Bottom CTA Heading', type: 'text', defaultVal: 'Let Purecrest Manage Your Shortlet or Hotel — We Deliver Results with Integrity' },
       { key: 'hosp_cta_subtitle', label: 'Bottom CTA Description', type: 'textarea', defaultVal: 'Transparent reporting, professional management, and maximum revenue — all with zero compromise on standards.' },
     ],
@@ -134,7 +130,7 @@ export const CMS_TABS: CmsTab[] = [
     fields: [
       { key: 'vs_hero_title', label: 'Hero Headline', type: 'textarea', defaultVal: 'Hospitality Virtual Support\nProfessional Services' },
       { key: 'vs_hero_subtitle', label: 'Hero Description', type: 'textarea', defaultVal: 'Professional remote hospitality management for property owners. Our dedicated virtual support team handles your guests, bookings, and operations — so you can earn more while doing less.' },
-      { key: 'vs_hero_image', label: 'Hero Background Image', type: 'image', defaultVal: '/static/service-hospitality.jpg' },
+      { key: 'vs_hero_image', label: 'Hero Background Image', type: 'image', defaultVal: '/assets/aistudio/F1834A2C-2DF3-4AEB-8A69-8229BB53CCAC_9dec0e0c.png' },
       { key: 'vs_reach_banner', label: 'Global Reach Strip Text', type: 'text', defaultVal: 'We serve property owners in Nigeria · UK · USA · Canada · Europe · Middle East · Australia · and beyond.' },
       { key: 'vs_intro_title', label: 'Intro Heading', type: 'text', defaultVal: 'For Property Owners Who Want Hands-Free Management' },
       { key: 'vs_intro_body', label: 'Intro Description', type: 'textarea', defaultVal: 'Whether you live abroad, have a busy schedule, or simply want a professional team managing your hospitality business — Purecrest Virtual Support delivers the expertise and dedication of a full management team, remotely.' },
@@ -146,11 +142,10 @@ export const CMS_TABS: CmsTab[] = [
     label: 'Property Services',
     icon: 'fa-building',
     previewPath: '/property-services',
-    description: 'Edit text and hero imagery for the Real Estate & Property Services page.',
+    description: 'Edit text for the Real Estate & Property Services page.',
     fields: [
-      { key: 'prop_hero_title', label: 'Hero Headline', type: 'textarea', defaultVal: 'Real Estate Solutions\nThat Create Value' },
+      { key: 'prop_hero_title', label: 'Hero Headline', type: 'textarea', defaultVal: 'Property Sales, Leasing\n& Advisory' },
       { key: 'prop_hero_subtitle', label: 'Hero Description', type: 'textarea', defaultVal: 'We connect buyers, sellers, tenants, and investors with premium residential and commercial properties across Nigeria — with expert advisory at every step.' },
-      { key: 'property_hero_image', label: 'Hero Background Image', type: 'image', defaultVal: '/static/service-property.jpg' },
       { key: 'prop_services_heading', label: 'Services Grid Heading', type: 'text', defaultVal: 'From Acquisition to Investment' },
       { key: 'prop_cta_title', label: 'Bottom CTA Heading', type: 'text', defaultVal: 'Looking for a Property?' },
       { key: 'prop_cta_subtitle', label: 'Bottom CTA Subtext', type: 'textarea', defaultVal: 'Browse our curated listings or speak to one of our property experts today.' },
@@ -165,26 +160,12 @@ export const CMS_TABS: CmsTab[] = [
     fields: [
       { key: 'tech_hero_title', label: 'Hero Headline', type: 'textarea', defaultVal: 'Digital Solutions\nThat Power Modern\nHospitality & Business' },
       { key: 'tech_hero_subtitle', label: 'Hero Description', type: 'textarea', defaultVal: 'We build the web platforms, booking systems, and hospitality software that power Purecrest and our clients — combining deep industry knowledge with modern technology to deliver measurable digital transformation.' },
-      { key: 'technology_hero_image', label: 'Hero Background Image', type: 'image', defaultVal: '/static/service-solutions.jpg' },
+      { key: 'technology_hero_image', label: 'Hero Background Image', type: 'image', defaultVal: '/assets/aistudio/3C945DE4-8BB6-448E-8828-635AEAEE8958_d7ecfef0.png' },
       { key: 'tech_core_heading', label: 'Core Services Heading', type: 'text', defaultVal: 'Our Core Technology Services' },
       { key: 'tech_core_subtitle', label: 'Core Services Subtext', type: 'textarea', defaultVal: 'From custom websites to intelligent booking systems, we engineer the digital backbone of modern hospitality and property businesses.' },
       { key: 'tech_pms_title', label: 'Hotel PMS Section Heading', type: 'text', defaultVal: 'Get Your Hotel Property Management System (PCHPMS)' },
       { key: 'tech_pms_body', label: 'Hotel PMS Description', type: 'textarea', defaultVal: 'Streamline hotel operations, reservations, housekeeping, guest billing, and multi-property analytics with Purecrest Hotel PMS — purpose-built for modern African hospitality operators.' },
       { key: 'tech_pms_url', label: 'Hotel PMS Link URL', type: 'url', defaultVal: 'https://pchpms.com' },
-    ],
-  },
-  {
-    id: 'solutions',
-    label: 'Solutions',
-    icon: 'fa-briefcase',
-    previewPath: '/solutions',
-    description: 'Edit headlines, hero image, and call-to-action on Purecrest Solutions.',
-    fields: [
-      { key: 'sol_hero_title', label: 'Hero Headline', type: 'textarea', defaultVal: 'Grow Your Business\nwith Purecrest Solutions' },
-      { key: 'sol_hero_subtitle', label: 'Hero Description', type: 'textarea', defaultVal: 'We help businesses, startups, and investors achieve clarity, visibility, and growth through strategic branding, digital marketing, web development, and business consulting.' },
-      { key: 'solutions_hero_image', label: 'Hero Background Image', type: 'image', defaultVal: '/static/service-solutions.jpg' },
-      { key: 'sol_cta_title', label: 'Bottom CTA Heading', type: 'text', defaultVal: 'Ready to Grow Your Business?' },
-      { key: 'sol_cta_subtitle', label: 'Bottom CTA Subtext', type: 'textarea', defaultVal: "Let's talk about how Purecrest Solutions can help you achieve your business goals." },
     ],
   },
   {
@@ -195,10 +176,10 @@ export const CMS_TABS: CmsTab[] = [
     description: 'Edit the main Services overview page copy.',
     fields: [
       { key: 'svc_hero_title', label: 'Hero Title', type: 'text', defaultVal: 'Our Services' },
-      { key: 'svc_hero_subtitle', label: 'Hero Description', type: 'textarea', defaultVal: 'Three powerful business lines working together to deliver exceptional value — hospitality management, real estate solutions, and business advisory.' },
+      { key: 'svc_hero_subtitle', label: 'Hero Description', type: 'textarea', defaultVal: 'Three powerful business lines working together to deliver exceptional value — hospitality management, property services, and hospitality technology.' },
       { key: 'svc_hosp_body', label: 'Hospitality Pillar Summary', type: 'textarea', defaultVal: 'We deliver world-class hospitality management, serviced apartment operations, and short-let management that create memorable guest experiences and maximise property returns.' },
       { key: 'svc_prop_body', label: 'Property Pillar Summary', type: 'textarea', defaultVal: 'We deliver comprehensive real estate services — from property development and sales to leasing, management, and investment advisory — helping clients achieve measurable results.' },
-      { key: 'svc_sol_body', label: 'Solutions & Technology Pillar Summary', type: 'textarea', defaultVal: 'We help businesses grow through strategic branding, digital marketing, and powerful technology — including web development, booking systems, and hospitality software that power our wider operations.' },
+      { key: 'svc_sol_body', label: 'Pure Crest Technology Pillar Summary', type: 'textarea', defaultVal: 'We engineer web platforms, booking engines, and hospitality software — including Purecrest Hotel PMS — that power modern hotels, serviced apartments, and property businesses.' },
     ],
   },
   {
@@ -235,12 +216,11 @@ export const CMS_TABS: CmsTab[] = [
     label: 'Contact & Footer',
     icon: 'fa-address-book',
     previewPath: '/contact',
-    description: 'Edit Contact page copy, office address, WhatsApp, email, social links, and global footer text.',
+    description: 'Edit Contact page copy, WhatsApp, email, social links, and global footer text.',
     fields: [
       { key: 'contact_hero_title', label: 'Contact Page Title', type: 'text', defaultVal: 'Contact Us' },
       { key: 'contact_hero_subtitle', label: 'Contact Page Subtitle', type: 'textarea', defaultVal: "We'd love to hear from you. Reach out for enquiries about our properties, hospitality services, or investment advisory." },
-      { key: 'contact_office_intro', label: 'Office Intro Copy', type: 'textarea', defaultVal: "Visit us, call us, or send a message — we're available to help you navigate your real estate and hospitality journey." },
-      { key: 'office_address', label: 'Office Address', type: 'text', defaultVal: 'Abuja, Federal Capital Territory, Nigeria' },
+      { key: 'contact_office_intro', label: 'Contact Intro Copy', type: 'textarea', defaultVal: "Call us, chat on WhatsApp, or send a message — we're available to help you navigate your real estate and hospitality journey." },
       { key: 'contact_email', label: 'Public Contact Email', type: 'text', defaultVal: 'hello@purecrest.ng' },
       { key: 'whatsapp_number', label: 'WhatsApp Number', type: 'text', defaultVal: '+2349130403970' },
       { key: 'footer_tagline', label: 'Footer Brand Tagline', type: 'textarea', defaultVal: 'Delivering excellence in hospitality management, real estate solutions, and property technology across Nigeria.' },
@@ -272,7 +252,7 @@ export function renderPmsMarketingSection(
   const ctaUrl = escHtml(settings.pms_banner_cta_url || 'https://pchpms.com')
   const secondaryText = escHtml(settings.pms_banner_secondary_text || 'Request a Guided Demo')
   const secondaryUrl = escHtml(settings.pms_banner_secondary_url || '/contact?service=hospitality-software')
-  const pmsImage = settings.pms_banner_image || '/static/service-solutions.jpg'
+  const pmsImage = settings.pms_banner_image || '/assets/aistudio/3C945DE4-8BB6-448E-8828-635AEAEE8958_d7ecfef0.png'
 
   const features = [
     settings.pms_feature_1 || 'Front Desk, Reservations & Instant Check-In',
@@ -420,8 +400,8 @@ export function renderAdminCmsPage(
                 </button>
                 <span class="text-xs text-slate-400">Auto-optimised &amp; saved immediately</span>
               </div>
+              <label for="input_${f.key}" class="block text-xs font-medium text-slate-500">Image URL</label>
               <input type="text" id="input_${f.key}" name="${f.key}" value="${safeVal}"
-                placeholder="Or paste image URL (/static/... or https://...)"
                 oninput="document.getElementById('prev_${f.key}').src=this.value"
                 class="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs font-mono text-slate-700 focus:outline-none focus:border-amber-500" />
               ${f.help ? `<p class="text-xs text-slate-500">${escHtml(f.help)}</p>` : ''}
@@ -435,8 +415,7 @@ export function renderAdminCmsPage(
         <div>
           <label for="cms_${f.key}" class="block text-sm font-semibold text-slate-700 mb-1.5">${escHtml(f.label)}</label>
           <textarea id="cms_${f.key}" name="${f.key}" rows="3"
-            class="w-full px-3.5 py-2.5 border border-slate-200 rounded-lg text-sm text-slate-800 focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100"
-            placeholder="${escHtml(f.placeholder || '')}">${safeVal}</textarea>
+            class="w-full px-3.5 py-2.5 border border-slate-200 rounded-lg text-sm text-slate-800 focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100">${safeVal}</textarea>
           ${f.help ? `<p class="text-xs text-slate-500 mt-1">${escHtml(f.help)}</p>` : ''}
         </div>`
       }
@@ -445,7 +424,6 @@ export function renderAdminCmsPage(
       <div>
         <label for="cms_${f.key}" class="block text-sm font-semibold text-slate-700 mb-1.5">${escHtml(f.label)}</label>
         <input type="${f.type === 'url' ? 'url' : 'text'}" id="cms_${f.key}" name="${f.key}" value="${safeVal}"
-          placeholder="${escHtml(f.placeholder || '')}"
           class="w-full px-3.5 py-2.5 border border-slate-200 rounded-lg text-sm text-slate-800 focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100" />
         ${f.help ? `<p class="text-xs text-slate-500 mt-1">${escHtml(f.help)}</p>` : ''}
       </div>`

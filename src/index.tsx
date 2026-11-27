@@ -130,12 +130,12 @@ app.get('/properties', async (c) => {
   let params: any[] = []
 
   if (category) { where += ` AND category = ?`; params.push(category) }
-  if (area) { where += ` AND area LIKE ?`; params.push(`%${area}%`) }
+  if (area) { where += ` AND (area LIKE ? OR city LIKE ? OR location LIKE ?)`; params.push(`%${area}%`, `%${area}%`, `%${area}%`) }
   if (type) { where += ` AND property_type = ?`; params.push(type) }
   if (minPrice) { where += ` AND price >= ?`; params.push(parseFloat(minPrice)) }
   if (maxPrice) { where += ` AND price <= ?`; params.push(parseFloat(maxPrice)) }
   if (beds) { where += ` AND bedrooms >= ?`; params.push(parseInt(beds)) }
-  if (search) { where += ` AND (title LIKE ? OR location LIKE ? OR area LIKE ?)`; params.push(`%${search}%`, `%${search}%`, `%${search}%`) }
+  if (search) { where += ` AND (title LIKE ? OR location LIKE ? OR area LIKE ? OR city LIKE ?)`; params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`) }
 
   let properties: any[] = []
   let total = 0
@@ -171,8 +171,8 @@ app.get('/listings', async (c) => {
   let params: any[] = []
 
   if (category) { where += ` AND category = ?`; params.push(category) }
-  if (area) { where += ` AND area LIKE ?`; params.push(`%${area}%`) }
-  if (search) { where += ` AND (title LIKE ? OR location LIKE ? OR area LIKE ?)`; params.push(`%${search}%`, `%${search}%`, `%${search}%`) }
+  if (area) { where += ` AND (area LIKE ? OR city LIKE ? OR location LIKE ?)`; params.push(`%${area}%`, `%${area}%`, `%${area}%`) }
+  if (search) { where += ` AND (title LIKE ? OR location LIKE ? OR area LIKE ? OR city LIKE ?)`; params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`) }
 
   let properties: any[] = []
   let total = 0
@@ -206,9 +206,9 @@ app.get('/shortlets', async (c) => {
   let where = `WHERE status = 'active' AND category = 'short-let'`
   let params: any[] = []
 
-  if (area) { where += ` AND (area LIKE ? OR location LIKE ? OR address LIKE ?)`; params.push(`%${area}%`, `%${area}%`, `%${area}%`) }
+  if (area) { where += ` AND (area LIKE ? OR city LIKE ? OR location LIKE ? OR address LIKE ?)`; params.push(`%${area}%`, `%${area}%`, `%${area}%`, `%${area}%`) }
   if (beds) { where += ` AND bedrooms >= ?`; params.push(parseInt(beds)) }
-  if (search) { where += ` AND (title LIKE ? OR location LIKE ? OR area LIKE ? OR description LIKE ?)`; params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`) }
+  if (search) { where += ` AND (title LIKE ? OR location LIKE ? OR area LIKE ? OR city LIKE ? OR description LIKE ?)`; params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`) }
   if (maxprice) { where += ` AND price <= ?`; params.push(parseInt(maxprice)) }
 
   let properties: any[] = []
@@ -231,6 +231,9 @@ app.get('/shortlets', async (c) => {
 app.get('/property/:id', async (c) => {
   const db = c.env.DB
   const id = c.req.param('id')
+  if (id === 'PC-ENUGU-01') {
+    return c.redirect('/property/richgate-apartments-enugu', 301)
+  }
   let property: any = null
   let similar: any[] = []
   let agent: any = null
@@ -398,10 +401,9 @@ app.get('/property', async (c) => {
   return c.html(propertyServicesPage(settings))
 })
 
-// ========== SOLUTIONS PAGE ==========
-app.get('/solutions', async (c) => {
-  const settings = await getSiteSettings(c.env.DB)
-  return c.html(solutionsPage(settings))
+// ========== SOLUTIONS REDIRECT (page removed) ==========
+app.get('/solutions', (c) => {
+  return c.redirect('/services', 301)
 })
 
 // ========== OTA LISTING OPTIMIZATION PAGE ==========
@@ -1167,7 +1169,7 @@ app.post('/admin/properties/save', async (c) => {
   const areaVal = str(body.area).trim()
   const lagosAreas = new Set(['Victoria Island','Lekki','Ikoyi','Ajah','Yaba','Surulere','Ikeja','Lagos Island','Apapa','Maryland','Gbagada','Magodo','Lekki Phase 1','Sangotedo','Banana Island','Eko Atlantic'])
   const abujaAreas = new Set(['Maitama','Wuse 2','Asokoro','Jabi','Garki','Utako','Guzape','Kubwa','Kado','Apo','Gwarinpa','Katampe','Lugbe','Kuje','Wuse','Central Business District','Durumi','Gudu','Lokogoma'])
-  const enuguAreas = new Set(['Independence Layout','New Haven','GRA Enugu','Trans-Ekulu','Achara Layout','Uwani','Coal Camp','Ogui','Enugu'])
+  const enuguAreas = new Set(['Thinkers Corner','Independence Layout','New Haven','GRA Enugu','Trans-Ekulu','Achara Layout','Uwani','Coal Camp','Ogui','Enugu'])
   let cityVal = str(body.city).trim()
   if (!cityVal) {
     if (lagosAreas.has(areaVal)) cityVal = 'Lagos'
@@ -1809,11 +1811,11 @@ app.post('/admin/technology/save', async (c) => {
 app.post('/admin/settings/save', async (c) => {
   const db = c.env.DB
   const body = await c.req.parseBody()
-  const keys = ['hero_title', 'hero_subtitle', 'hero_bg_image', 'hero_bg_overlay', 'logo_text', 'logo_subtitle', 'phone_number', 'whatsapp_number', 'contact_email', 'office_address', 'facebook_url', 'instagram_url', 'twitter_url', 'whatsapp_url', 'footer_tagline', 'ads_enabled', 'blog_enabled', 'adsense_pub_id', 'service_img_hospitality', 'service_img_property', 'service_img_solutions', 'about_section_image', 'hospitality_hero_image', 'hospitality_partner_image', 'property_hero_image', 'solutions_hero_image', 'technology_hero_image', 'technology_intro_title', 'technology_intro_body', 'whatwedo_title', 'whatwedo_body', 'manage_section_title', 'manage_section_body']
+  const keys = ['hero_title', 'hero_subtitle', 'hero_bg_image', 'hero_bg_overlay', 'logo_text', 'logo_subtitle', 'phone_number', 'whatsapp_number', 'contact_email', 'facebook_url', 'instagram_url', 'twitter_url', 'whatsapp_url', 'footer_tagline', 'ads_enabled', 'blog_enabled', 'adsense_pub_id', 'service_img_solutions', 'service_img_virtual_support', 'about_section_image', 'technology_hero_image', 'technology_intro_title', 'technology_intro_body', 'whatwedo_title', 'whatwedo_body', 'manage_section_title', 'manage_section_body']
   try {
     // Image keys that should NOT be overwritten with empty string
     // (they are saved separately via file upload handling below)
-    const imageKeys = new Set(['hero_bg_image', 'service_img_hospitality', 'service_img_property', 'service_img_solutions', 'about_section_image', 'hospitality_hero_image', 'hospitality_partner_image', 'property_hero_image', 'solutions_hero_image', 'technology_hero_image'])
+    const imageKeys = new Set(['hero_bg_image', 'service_img_solutions', 'service_img_virtual_support', 'about_section_image', 'technology_hero_image'])
     for (const key of keys) {
       if (body[key] !== undefined) {
         // Skip placeholder for hero_bg_image when uploaded file is present
@@ -1855,14 +1857,9 @@ app.post('/admin/settings/save', async (c) => {
     }
     // Handle section image uploads
     const sectionImgKeys: Record<string, string> = {
-      'service_img_hospitality_file': 'service_img_hospitality',
-      'service_img_property_file': 'service_img_property',
       'service_img_solutions_file': 'service_img_solutions',
+      'service_img_virtual_support_file': 'service_img_virtual_support',
       'about_section_image_file': 'about_section_image',
-      'hospitality_hero_image_file': 'hospitality_hero_image',
-      'hospitality_partner_image_file': 'hospitality_partner_image',
-      'property_hero_image_file': 'property_hero_image',
-      'solutions_hero_image_file': 'solutions_hero_image',
     }
     for (const [fileField, settingKey] of Object.entries(sectionImgKeys)) {
       const imgFile = body[fileField] as File
@@ -2082,24 +2079,8 @@ app.post('/api/bookings', async (c) => {
       }
     }
 
-    // Authoritative add-ons calculation
-    const addonCatalog: Record<string, { label: string; price: number; perNight?: boolean }> = {
-      airport_pickup: { label: 'Airport Chauffeur Pickup', price: 25000 },
-      early_late: { label: 'Early Check-in & Late Check-out', price: 15000 },
-      breakfast_chef: { label: 'Daily Breakfast / Private Chef', price: 12000, perNight: true },
-      laundry: { label: 'Express Laundry & Pressing', price: 8000 },
-    }
-    const requestedAddons = Array.isArray(body.addons) ? body.addons.map((a: any) => String(a)) : []
     const validAddons: Array<{ key: string; label: string; cost: number }> = []
-    let addonsTotal = 0
-    for (const key of requestedAddons) {
-      const def = addonCatalog[key]
-      if (def) {
-        const cost = def.perNight ? def.price * nights : def.price
-        addonsTotal += cost
-        validAddons.push({ key, label: def.label, cost })
-      }
-    }
+    const addonsTotal = 0
 
     const subtotal = nightlyRate * nights
     const promoRaw = String(body.promo_code || '').trim().toUpperCase()
@@ -2743,9 +2724,9 @@ function propertyCard(prop: any): string {
   const locDisplay = `${prop.area || ''}${prop.city ? (prop.area ? ', ' : '') + prop.city : ''}` || prop.location || 'Nigeria'
   const specs: string[] = []
   if (prop.rooms_count && Number(prop.rooms_count) > 0) specs.push(`${prop.rooms_count} Room Types`)
-  if (prop.category !== 'land' && prop.bedrooms > 0) specs.push(`${prop.bedrooms} Bed`)
-  if (prop.category !== 'land' && prop.bathrooms > 0) specs.push(`${prop.bathrooms} Bath`)
-  if (prop.size_sqm) specs.push(`${prop.size_sqm} sqm`)
+  if (prop.category !== 'land' && prop.category !== 'short-let' && prop.bedrooms > 0) specs.push(`${prop.bedrooms} Bed`)
+  if (prop.category !== 'land' && prop.category !== 'short-let' && prop.bathrooms > 0) specs.push(`${prop.bathrooms} Bath`)
+  if (prop.category !== 'short-let' && prop.size_sqm) specs.push(`${prop.size_sqm} sqm`)
 
   return `
   <article data-cat="${escHtml(prop.category || '')}" class="prop-card-item bg-white rounded-xl border border-[#e8e6e0] overflow-hidden hover:shadow-xl hover:-translate-y-1 transition-all duration-300 group flex flex-col">
@@ -2796,7 +2777,6 @@ function adBanner(ad: any): string {
 function layout(title: string, content: string, extraHead: string = '', settings: Record<string, string> = {}, seo: { description?: string, keywords?: string, path?: string } = {}): string {
   const logoText = settings.logo_text || 'PureCrest'
   const logoSub = settings.logo_subtitle || 'Hospitality · Property · Solutions'
-  const address = settings.office_address || 'Abuja, Nigeria'
   const waNum = settings.whatsapp_number || '+2349130403970'
   const email = settings.contact_email || 'hello@purecrest.ng'
   const fbUrl = settings.facebook_url || '#'
@@ -3108,6 +3088,8 @@ function layout(title: string, content: string, extraHead: string = '', settings
       <a href="/technology" class="nav-link py-3 border-b" style="border-color:rgba(255,255,255,0.07);">Technology</a>
       <a href="/training" class="nav-link py-3 border-b" style="border-color:rgba(255,255,255,0.07);color:var(--gold);"><i class="fas fa-graduation-cap" style="font-size:0.75rem;margin-right:4px;"></i>Training</a>
       <a href="/about" class="nav-link py-3 border-b" style="border-color:rgba(255,255,255,0.07);">About</a>
+      <a href="/admin/dashboard" class="nav-link py-3 border-b" style="border-color:rgba(255,255,255,0.07);">Admin Dashboard</a>
+      <a href="/admin/login" class="nav-link py-3 border-b" style="border-color:rgba(255,255,255,0.07);color:var(--gold);">Admin Login</a>
       <a href="/contact" class="btn-cta mt-4 justify-center">Contact Us</a>
     </nav>
   </div>
@@ -3136,7 +3118,7 @@ ${content}
       <div>
         <h4 style="color:#fff; font-family:'Plus Jakarta Sans',sans-serif; font-weight:600; font-size:0.875rem; letter-spacing:0.05em; margin-bottom:20px;">Quick Links</h4>
         <ul style="list-style:none; padding:0; margin:0; space-y:10px;">
-          ${[['About Us','/about'],['Our Services','/services'],['Hospitality','/hospitality'],['Blog','/blog'],['Virtual Support','/virtual-support'],['Technology','/technology'],['Contact Us','/contact']].map(([label,href])=>`<li style="margin-bottom:10px;"><a href="${href}" style="color:#8a9688;font-size:0.875rem;font-family:'Plus Jakarta Sans',sans-serif;text-decoration:none;transition:color 0.2s;" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='#8a9688'">${label}</a></li>`).join('')}
+          ${[['About Us','/about'],['Our Services','/services'],['Hospitality','/hospitality'],['Blog','/blog'],['Virtual Support','/virtual-support'],['Technology','/technology'],['Contact Us','/contact'],['Admin Dashboard','/admin/dashboard'],['Admin Login','/admin/login']].map(([label,href])=>`<li style="margin-bottom:10px;"><a href="${href}" style="color:#8a9688;font-size:0.875rem;font-family:'Plus Jakarta Sans',sans-serif;text-decoration:none;transition:color 0.2s;" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='#8a9688'">${label}</a></li>`).join('')}
         </ul>
       </div>
       <!-- Our Services -->
@@ -3163,6 +3145,8 @@ ${content}
         <a href="/privacy" style="font-size:0.8rem; color:#4a5648; text-decoration:none;" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='#4a5648'">Privacy Policy</a>
         <a href="/terms" style="font-size:0.8rem; color:#4a5648; text-decoration:none;" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='#4a5648'">Terms &amp; Conditions</a>
         <a href="/disclaimer" style="font-size:0.8rem; color:#4a5648; text-decoration:none;" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='#4a5648'">Disclaimer</a>
+        <a href="/admin/dashboard" style="font-size:0.8rem; color:#8a9688; text-decoration:none;" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='#8a9688'">Admin Dashboard</a>
+        <a href="/admin/login" style="font-size:0.8rem; color:#8a9688; text-decoration:none;" onmouseover="this.style.color='var(--gold)'" onmouseout="this.style.color='#8a9688'">Admin Login</a>
       </div>
     </div>
   </div>
@@ -3279,13 +3263,12 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
   const heroCta1Url = escHtml('/services')
   const heroCta2Text = escHtml('Contact Us')
   const heroCta2Url = escHtml('/contact')
-  const serviceImg1 = settings.service_img_hospitality || '/static/service-hospitality.jpg'
-  const serviceImg2 = settings.service_img_property || '/static/service-property.jpg'
-  const serviceImg3 = settings.service_img_solutions || '/static/service-solutions.jpg'
+  const serviceImg3 = settings.service_img_solutions || '/assets/aistudio/3C945DE4-8BB6-448E-8828-635AEAEE8958_d7ecfef0.png'
+  const serviceImg4 = settings.service_img_virtual_support || '/assets/aistudio/F1834A2C-2DF3-4AEB-8A69-8229BB53CCAC_9dec0e0c.png'
 
   // Identify Richgate Apartments Enugu spotlight property for the Featured Residences section below
-  const richgateProp = featured.find((p: any) => p.listing_id === 'PC-ENUGU-01' || (p.title || '').toLowerCase().includes('richgate'))
-    || recent.find((p: any) => p.listing_id === 'PC-ENUGU-01' || (p.title || '').toLowerCase().includes('richgate'))
+  const richgateProp = featured.find((p: any) => p.listing_id === 'richgate-apartments-enugu' || p.listing_id === 'PC-ENUGU-01' || (p.title || '').toLowerCase().includes('richgate'))
+    || recent.find((p: any) => p.listing_id === 'richgate-apartments-enugu' || p.listing_id === 'PC-ENUGU-01' || (p.title || '').toLowerCase().includes('richgate'))
   const richgateImgs = richgateProp ? getImages(richgateProp) : []
   const richgateHeroThumb = richgateImgs[0] || '/assets/aistudio/file_000000003fc881f4b5e66b7352a17edc_c7ca46a2.png'
   const richgateRoomsPreview: any[] = Array.isArray(richgateProp?.rooms_preview) ? richgateProp.rooms_preview : []
@@ -3343,51 +3326,69 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
     <div class="max-w-7xl mx-auto px-4 md:px-6">
       <form method="GET" action="/properties" style="background:var(--cream); border-radius:12px; padding:18px 22px; border:1px solid #e4dfd6;">
         <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; color:#6b6b66; letter-spacing:0.14em; text-transform:uppercase; margin-bottom:12px; display:flex; align-items:center; gap:7px;"><i class="fas fa-search" style="color:var(--gold);"></i> Search Residences, Shortlets &amp; Land Across Nigeria</p>
-        <div style="display:grid; grid-template-columns:2fr 1fr 1.1fr 1fr auto; gap:10px; align-items:center;" class="home-search-grid">
-          <input type="text" name="q" placeholder="Search Richgate, Independence Layout, Maitama, Lekki..." style="padding:11px 14px; border:1.5px solid #dcd8cf; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;" />
-          <select name="category" style="padding:11px 14px; border:1.5px solid #dcd8cf; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;">
-            <option value="">All Categories</option>
-            <option value="short-let">Short Let</option>
-            <option value="buy">For Sale</option>
-            <option value="rent">For Rent</option>
-            <option value="land">Land</option>
-          </select>
-          <select name="area" style="padding:11px 14px; border:1.5px solid #dcd8cf; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;">
-            <option value="">All Locations</option>
-            <optgroup label="— Enugu —">
-              <option value="Independence Layout">Independence Layout, Enugu</option>
-              <option value="New Haven">New Haven, Enugu</option>
-              <option value="GRA Enugu">GRA Enugu</option>
-              <option value="Trans-Ekulu">Trans-Ekulu, Enugu</option>
-              <option value="Achara Layout">Achara Layout, Enugu</option>
-            </optgroup>
-            <optgroup label="— Abuja (FCT) —">
-              <option value="Maitama">Maitama</option>
-              <option value="Wuse 2">Wuse 2</option>
-              <option value="Asokoro">Asokoro</option>
-              <option value="Jabi">Jabi</option>
-              <option value="Garki">Garki</option>
-              <option value="Utako">Utako</option>
-              <option value="Guzape">Guzape</option>
-              <option value="Gwarinpa">Gwarinpa</option>
-              <option value="Katampe">Katampe</option>
-            </optgroup>
-            <optgroup label="— Lagos —">
-              <option value="Victoria Island">Victoria Island</option>
-              <option value="Ikoyi">Ikoyi</option>
-              <option value="Lekki">Lekki</option>
-              <option value="Lekki Phase 1">Lekki Phase 1</option>
-              <option value="Ikeja">Ikeja</option>
-              <option value="Ajah">Ajah</option>
-            </optgroup>
-          </select>
-          <select name="beds" style="padding:11px 14px; border:1.5px solid #dcd8cf; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;">
-            <option value="">Bedrooms</option>
-            <option value="1">1+ Beds</option>
-            <option value="2">2+ Beds</option>
-            <option value="3">3+ Beds</option>
-            <option value="4">4+ Beds</option>
-          </select>
+        <div style="display:grid; grid-template-columns:2fr 1fr 1.1fr 1fr auto; gap:10px; align-items:end;" class="home-search-grid">
+          <div>
+            <label for="homeSearchQ" style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.65rem; font-weight:700; color:#6b6b66; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Location or Keyword</label>
+            <input id="homeSearchQ" type="text" name="q" style="padding:11px 14px; border:1.5px solid #dcd8cf; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;" />
+          </div>
+          <div>
+            <label for="homeSearchCat" style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.65rem; font-weight:700; color:#6b6b66; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Category</label>
+            <select id="homeSearchCat" name="category" style="padding:11px 14px; border:1.5px solid #dcd8cf; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;">
+              <option value="">All Categories</option>
+              <option value="short-let">Short Let</option>
+              <option value="buy">For Sale</option>
+              <option value="rent">For Rent</option>
+              <option value="land">Land</option>
+            </select>
+          </div>
+          <div>
+            <label for="homeSearchArea" style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.65rem; font-weight:700; color:#6b6b66; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">City / Area</label>
+            <select id="homeSearchArea" name="area" style="padding:11px 14px; border:1.5px solid #dcd8cf; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;">
+              <option value="">All Locations</option>
+              <optgroup label="— Cities —">
+                <option value="Lagos">Lagos</option>
+                <option value="Abuja">Abuja</option>
+                <option value="Port Harcourt">Port Harcourt</option>
+              </optgroup>
+              <optgroup label="— Lagos —">
+                <option value="Victoria Island">Victoria Island</option>
+                <option value="Ikoyi">Ikoyi</option>
+                <option value="Lekki">Lekki</option>
+                <option value="Lekki Phase 1">Lekki Phase 1</option>
+                <option value="Ikeja">Ikeja</option>
+                <option value="Ajah">Ajah</option>
+              </optgroup>
+              <optgroup label="— Abuja (FCT) —">
+                <option value="Maitama">Maitama</option>
+                <option value="Wuse 2">Wuse 2</option>
+                <option value="Asokoro">Asokoro</option>
+                <option value="Jabi">Jabi</option>
+                <option value="Garki">Garki</option>
+                <option value="Utako">Utako</option>
+                <option value="Guzape">Guzape</option>
+                <option value="Gwarinpa">Gwarinpa</option>
+                <option value="Katampe">Katampe</option>
+              </optgroup>
+              <optgroup label="— Port Harcourt —">
+                <option value="New GRA">New GRA, Port Harcourt</option>
+                <option value="Old GRA">Old GRA, Port Harcourt</option>
+                <option value="Woji">Woji, Port Harcourt</option>
+                <option value="Peter Odili">Peter Odili, Port Harcourt</option>
+                <option value="Trans Amadi">Trans Amadi, Port Harcourt</option>
+                <option value="Ada George">Ada George, Port Harcourt</option>
+              </optgroup>
+            </select>
+          </div>
+          <div>
+            <label for="homeSearchBeds" style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.65rem; font-weight:700; color:#6b6b66; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:5px;">Bedrooms</label>
+            <select id="homeSearchBeds" name="beds" style="padding:11px 14px; border:1.5px solid #dcd8cf; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; width:100%;">
+              <option value="">Bedrooms</option>
+              <option value="1">1+ Beds</option>
+              <option value="2">2+ Beds</option>
+              <option value="3">3+ Beds</option>
+              <option value="4">4+ Beds</option>
+            </select>
+          </div>
           <button type="submit" class="whitespace-nowrap shrink-0" style="padding:11px 24px; background:var(--forest); color:#fff; border:none; border-radius:8px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:7px;" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">
             <i class="fas fa-search"></i> Search
           </button>
@@ -3432,7 +3433,7 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
             <div style="position:absolute; inset:0; background:linear-gradient(to top, rgba(5,28,18,0.86) 0%, rgba(5,28,18,0.18) 50%, transparent 100%);"></div>
             <div style="position:absolute; top:16px; left:16px; display:flex; gap:8px; flex-wrap:wrap;">
               <span style="background:var(--gold); color:#051C12; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.68rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; padding:5px 11px; border-radius:4px;">Featured Shortlet</span>
-              <span style="background:rgba(5,28,18,0.88); color:#fff; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.68rem; font-weight:600; padding:5px 11px; border-radius:4px;">Enugu · Independence Layout</span>
+              <span style="background:rgba(5,28,18,0.88); color:#fff; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.68rem; font-weight:600; padding:5px 11px; border-radius:4px;">${escHtml((richgateProp.area || 'Thinkers Corner') + ' · ' + (richgateProp.city || 'Enugu'))}</span>
             </div>
             <div style="position:absolute; bottom:18px; left:20px; right:20px; color:#fff;">
               <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.75rem; color:rgba(255,255,255,0.8); margin:0 0 4px;">
@@ -3447,27 +3448,24 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
           <!-- Right Details + Live Room Types Picker Preview -->
           <div class="lg:col-span-6 p-6 md:p-8 flex flex-col justify-between">
             <div>
-              <div class="flex items-start justify-between gap-3 mb-2">
-                <div>
-                  <p class="text-[11px] font-bold uppercase tracking-widest text-[#A8883A] mb-1">Signature Enugu Residence</p>
-                  <h3 style="font-family:'DM Serif Display',serif; font-size:clamp(1.5rem,2.4vw,2rem); color:var(--forest); margin:0; font-weight:400; line-height:1.15;">${escHtml(richgateProp.title)}</h3>
-                </div>
-                <span class="text-xs font-mono font-semibold text-gray-500 pt-1 shrink-0">${escHtml(richgateProp.listing_id)}</span>
+              <div class="mb-2">
+                <p class="text-[11px] font-bold uppercase tracking-widest text-[#A8883A] mb-1">Thinkers Corner, Enugu</p>
+                <h3 style="font-family:'DM Serif Display',serif; font-size:clamp(1.5rem,2.4vw,2rem); color:var(--forest); margin:0; font-weight:400; line-height:1.15;">${escHtml(richgateProp.title)}</h3>
               </div>
               <p class="text-xs text-gray-600 mb-3 flex items-center gap-1.5">
                 <i class="fas fa-map-marker-alt text-[#C9A84C]"></i>
-                <span>${escHtml(richgateProp.address ? richgateProp.address + ', ' : '')}${escHtml(richgateProp.area || 'Independence Layout')}, ${escHtml(richgateProp.city || 'Enugu')}</span>
+                <span>${escHtml(richgateProp.address ? richgateProp.address + ', ' : 'Plot C16-C, Fabian Okafor Close, Along Old Airport Road, ')}${escHtml(richgateProp.area || 'Thinkers Corner')}, ${escHtml(richgateProp.city || 'Enugu')}</span>
               </p>
               <p class="text-sm text-gray-600 leading-relaxed mb-5 line-clamp-2">${escHtml(richgateProp.description || '')}</p>
 
               <!-- Room Types Grid -->
-              <p class="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-2.5">Serviced Apartments &amp; Hotel Rooms (${richgateRoomsPreview.length || 8} Options)</p>
+              <p class="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-2.5">Serviced Apartments &amp; Hotel Rooms (${richgateProp.rooms_count || richgateRoomsPreview.length || 6} Options)</p>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mb-5">
                 ${(richgateRoomsPreview.length > 0 ? richgateRoomsPreview : [
-                  { room_name: 'RM-1 Deluxe Studio with Kitchenette', price_per_night: 65500, images: '["/assets/aistudio/C9775D2D-5C32-4EDC-9072-A3320F21BA93_0df87c78.png"]' },
-                  { room_name: 'RM-2 One Bedroom Suite Apartment', price_per_night: 80000, images: '["/assets/aistudio/IMG_1793_3e8044d1.jpeg"]' },
-                  { room_name: 'RM-3 Standard Studio with Kitchenette', price_per_night: 55000, images: '["/assets/aistudio/IMG_2050_feea3d0a.png"]' },
-                  { room_name: 'RM-8 One Bedroom Suite', price_per_night: 75000, images: '["/assets/aistudio/IMG_2192_852c7555.png"]' },
+                  { room_name: 'Deluxe Studio with Kitchenette', price_per_night: 65500, images: '["/assets/aistudio/C9775D2D-5C32-4EDC-9072-A3320F21BA93_0df87c78.png"]' },
+                  { room_name: 'One Bedroom Suite Apartment', price_per_night: 80000, images: '["/assets/aistudio/IMG_1793_3e8044d1.jpeg"]' },
+                  { room_name: 'Standard Studio with Kitchenette', price_per_night: 55000, images: '["/assets/aistudio/IMG_2050_feea3d0a.png"]' },
+                  { room_name: 'One Bedroom Suite', price_per_night: 75000, images: '["/assets/aistudio/IMG_2192_852c7555.png"]' },
                 ]).slice(0, 4).map((rm: any) => {
                   let rImgs: string[] = []
                   try { rImgs = Array.isArray(rm.images) ? rm.images : JSON.parse(rm.images || '[]') } catch { rImgs = [] }
@@ -3500,8 +3498,8 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
       </div>` : ''}
 
       ${otherFeatured.length > 0 ? `
-      <div id="homeFeaturedGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-        ${otherFeatured.slice(0, 8).map(propertyCard).join('')}
+      <div id="homeFeaturedGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+        ${otherFeatured.slice(0, 3).map(propertyCard).join('')}
       </div>` : ''}
     </div>
   </section>
@@ -3535,29 +3533,31 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
 
       <!-- 12-Col Bento Services Grid -->
       <div class="grid grid-cols-1 md:grid-cols-12 gap-5">
-        <a href="/hospitality" class="md:col-span-7 service-card group" style="text-decoration:none; display:flex; flex-direction:column;">
-          <div style="height:240px; overflow:hidden; position:relative; background:linear-gradient(135deg,var(--forest-mid),var(--forest));">
-            ${serviceImg1 ? `<img src="${escHtml(serviceImg1)}" alt="Purecrest Hospitality Management Nigeria" style="width:100%; height:100%; object-fit:cover; display:block;" onerror="this.style.display='none'" />` : ''}
-          </div>
-          <div style="padding:26px; flex:1; display:flex; flex-direction:column; justify-content:space-between;">
+        <a href="/hospitality" class="md:col-span-7 service-card group" style="text-decoration:none; display:flex; flex-direction:column; background:var(--forest); border-color:rgba(201,168,76,0.28); border-top:4px solid var(--gold);">
+          <div style="padding:36px 32px; flex:1; display:flex; flex-direction:column; justify-content:space-between;">
             <div>
-              <h3 style="font-family:'DM Serif Display',serif; font-size:1.35rem; color:var(--forest); margin-bottom:8px; font-weight:400;">${escHtml(settings.service_card_1_title || 'Purecrest Hospitality')}</h3>
-              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.7; color:#5e5e5e; margin-bottom:14px;">${escHtml(settings.service_card_1_desc || 'Hotel management, serviced apartments, and short-let operations delivering exceptional guest experiences and maximum owner returns.')}</p>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold); margin-bottom:12px;">01 · Hospitality Division</p>
+              <h3 style="font-family:'DM Serif Display',serif; font-size:clamp(1.55rem,2.4vw,1.95rem); color:#fff; margin-bottom:14px; font-weight:400; line-height:1.18;">${escHtml(settings.service_card_1_title || 'Purecrest Hospitality')}</h3>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.94rem; line-height:1.8; color:rgba(255,255,255,0.78); margin-bottom:24px; max-width:560px;">${escHtml(settings.service_card_1_desc || 'Hotel management, serviced apartments, and short-let operations delivering exceptional guest experiences and maximum owner returns.')}</p>
             </div>
-            <span style="display:inline-flex; align-items:center; gap:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:700; color:var(--forest);">Explore Hospitality <i class="fas fa-arrow-right" style="font-size:0.65rem;"></i></span>
+            <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; padding-top:18px; border-top:1px solid rgba(255,255,255,0.12);">
+              <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.78rem; color:rgba(255,255,255,0.65);">Hotels · Serviced Apartments · Shortlets</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.82rem; font-weight:700; color:var(--gold);">Explore Hospitality <i class="fas fa-arrow-right" style="font-size:0.65rem;"></i></span>
+            </div>
           </div>
         </a>
 
-        <a href="/property" class="md:col-span-5 service-card group" style="text-decoration:none; display:flex; flex-direction:column;">
-          <div style="height:240px; overflow:hidden; position:relative; background:linear-gradient(135deg,#1a2a3a,#0B1F3A);">
-            ${serviceImg2 ? `<img src="${escHtml(serviceImg2)}" alt="Purecrest Property Nigeria" style="width:100%; height:100%; object-fit:cover; display:block;" onerror="this.style.display='none'" />` : ''}
-          </div>
-          <div style="padding:26px; flex:1; display:flex; flex-direction:column; justify-content:space-between;">
+        <a href="/property" class="md:col-span-5 service-card group" style="text-decoration:none; display:flex; flex-direction:column; background:#F9F9F7; border-color:#dfd9cc; border-top:4px solid var(--navy);">
+          <div style="padding:36px 30px; flex:1; display:flex; flex-direction:column; justify-content:space-between;">
             <div>
-              <h3 style="font-family:'DM Serif Display',serif; font-size:1.35rem; color:var(--forest); margin-bottom:8px; font-weight:400;">${escHtml(settings.service_card_2_title || 'Purecrest Property')}</h3>
-              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.7; color:#5e5e5e; margin-bottom:14px;">${escHtml(settings.service_card_2_desc || 'Real estate development, property sales, leasing, and investment advisory creating lasting value across Nigeria.')}</p>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold-dark); margin-bottom:12px;">02 · Real Estate Division</p>
+              <h3 style="font-family:'DM Serif Display',serif; font-size:clamp(1.45rem,2.2vw,1.8rem); color:var(--forest); margin-bottom:14px; font-weight:400; line-height:1.18;">${escHtml(settings.service_card_2_title || 'Purecrest Property')}</h3>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.92rem; line-height:1.8; color:#555; margin-bottom:24px;">${escHtml(settings.service_card_2_desc || 'Real estate development, property sales, leasing, and investment advisory creating lasting value across Nigeria.')}</p>
             </div>
-            <span style="display:inline-flex; align-items:center; gap:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:700; color:var(--forest);">Browse Properties <i class="fas fa-arrow-right" style="font-size:0.65rem;"></i></span>
+            <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; padding-top:18px; border-top:1px solid #e5e0d5;">
+              <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.78rem; color:#666;">Sales · Leasing · Advisory</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.82rem; font-weight:700; color:var(--forest);">Browse Properties <i class="fas fa-arrow-right" style="font-size:0.65rem;"></i></span>
+            </div>
           </div>
         </a>
 
@@ -3574,14 +3574,18 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
           </div>
         </a>
 
-        <a href="/virtual-support" class="md:col-span-7 service-card" style="text-decoration:none; display:flex; flex-direction:column; justify-content:space-between; background:var(--forest); border-color:rgba(201,168,76,0.22);">
-          <div style="padding:32px 30px; display:flex; flex-direction:column; height:100%; justify-content:space-between;">
+        <a href="/virtual-support" class="md:col-span-7 service-card group" style="text-decoration:none; display:flex; flex-direction:column; background:var(--forest); border-color:rgba(201,168,76,0.22);">
+          <div style="height:210px; overflow:hidden; position:relative; background:linear-gradient(135deg,var(--forest-mid),var(--forest));">
+            ${serviceImg4 ? `<img src="${escHtml(serviceImg4)}" alt="Hospitality Virtual Support" style="width:100%; height:100%; object-fit:cover; display:block;" onerror="this.style.display='none'" />` : ''}
+            <div style="position:absolute; inset:0; background:linear-gradient(to top, rgba(5,28,18,0.75) 0%, rgba(5,28,18,0.12) 60%, transparent 100%);"></div>
+            <p style="position:absolute; bottom:14px; left:24px; margin:0; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.16em; text-transform:uppercase; color:var(--gold);">24/7 Remote Operations</p>
+          </div>
+          <div style="padding:24px 28px; display:flex; flex-direction:column; flex:1; justify-content:space-between;">
             <div>
-              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.16em; text-transform:uppercase; color:var(--gold); margin-bottom:10px;">24/7 Remote Operations</p>
-              <h3 style="font-family:'DM Serif Display',serif; font-size:1.55rem; color:#fff; margin-bottom:12px; font-weight:400;">${escHtml(settings.service_card_4_title || 'Hospitality Virtual Support')}</h3>
-              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.92rem; line-height:1.75; color:rgba(255,255,255,0.74); margin-bottom:24px; max-width:540px;">${escHtml(settings.service_card_4_desc || 'Professional remote management for your hospitality business — 24/7 guest support, reservations, revenue management, and operations coordination.')}</p>
+              <h3 style="font-family:'DM Serif Display',serif; font-size:1.45rem; color:#fff; margin-bottom:10px; font-weight:400;">${escHtml(settings.service_card_4_title || 'Hospitality Virtual Support')}</h3>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.72; color:rgba(255,255,255,0.76); margin-bottom:18px; max-width:560px;">${escHtml(settings.service_card_4_desc || 'Professional remote management for your hospitality business — 24/7 guest support, reservations, revenue management, and operations coordination.')}</p>
             </div>
-            <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:14px; padding-top:18px; border-top:1px solid rgba(255,255,255,0.1);">
+            <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:14px; padding-top:14px; border-top:1px solid rgba(255,255,255,0.1);">
               <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; color:rgba(255,255,255,0.68);">Airbnb · Booking.com · Direct Reservations</span>
               <span style="display:inline-flex; align-items:center; gap:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.82rem; font-weight:700; color:var(--gold);">Learn More <i class="fas fa-arrow-right" style="font-size:0.65rem;"></i></span>
             </div>
@@ -3758,7 +3762,7 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
             Let Us Help You Find Your Next Property
           </h2>
           <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; line-height:1.8; color:#555; margin-bottom:28px;">
-            Tell our property advisory team what you are looking for — whether a residence to buy, a corporate lease, verified investment land, or an executive shortlet in Enugu, Abuja, or Lagos.
+            Tell our property advisory team what you are looking for — whether a residence to buy, a corporate lease, verified investment land, or an executive shortlet in Lagos, Abuja, or Port Harcourt.
           </p>
           <div class="space-y-4 border-t border-gray-100 pt-6">
             ${[
@@ -3809,9 +3813,9 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
                 <div>
                   <label class="block text-xs font-semibold text-gray-700 mb-1">Preferred City</label>
                   <select id="hfCity" class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C]">
-                    <option value="Enugu">Enugu (Independence Layout, GRA)</option>
+                    <option value="Lagos">Lagos (Ikoyi, VI, Lekki, Ikeja)</option>
                     <option value="Abuja">Abuja (Maitama, Wuse II, Asokoro)</option>
-                    <option value="Lagos">Lagos (Ikoyi, VI, Lekki)</option>
+                    <option value="Port Harcourt">Port Harcourt (New GRA, Old GRA, Woji)</option>
                     <option value="Other Nigeria">Other Nigerian City</option>
                   </select>
                 </div>
@@ -3827,16 +3831,16 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
                 </div>
                 <div>
                   <label class="block text-xs font-semibold text-gray-700 mb-1">Your Full Name <span class="text-red-500">*</span></label>
-                  <input type="text" id="hfName" required placeholder="e.g. Chinedu Okafor" class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C]" />
+                  <input type="text" id="hfName" required class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C]" />
                 </div>
                 <div>
                   <label class="block text-xs font-semibold text-gray-700 mb-1">Phone / WhatsApp <span class="text-red-500">*</span></label>
-                  <input type="tel" id="hfPhone" required placeholder="e.g. +234 803 000 0000" class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C]" />
+                  <input type="tel" id="hfPhone" required class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C]" />
                 </div>
               </div>
               <div>
                 <label class="block text-xs font-semibold text-gray-700 mb-1">Target Budget &amp; Neighbourhood Preferences</label>
-                <textarea id="hfDetails" rows="2" placeholder="Share preferred district, target budget range in ₦, or move-in timeline..." class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C] resize-none"></textarea>
+                <textarea id="hfDetails" rows="2" class="w-full px-3.5 py-2.5 rounded-lg border border-[#d9d3c7] bg-white text-sm focus:outline-none focus:border-[#C9A84C] resize-none"></textarea>
               </div>
               <div id="hfError" class="hidden text-xs px-3 py-2 rounded-lg bg-red-50 text-red-700 border border-red-200 font-medium"></div>
               <div class="flex flex-wrap items-center justify-between gap-3 pt-1">
@@ -3981,18 +3985,6 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
     @media (max-width:768px) { .blog-cards-grid { grid-template-columns:1fr !important; } }
     @media (min-width:480px) and (max-width:768px) { .blog-cards-grid { grid-template-columns:repeat(2,1fr) !important; } }
   </style>` : ''}
-
-  <!-- CTA STRIP -->
-  <section style="background:var(--navy); padding:64px 0;">
-    <div class="max-w-5xl mx-auto px-6" style="display:flex; flex-direction:column; align-items:center; text-align:center; gap:20px;">
-      <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold);">Ready to get started?</p>
-      <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.5rem,3vw,2.25rem); color:#fff; margin:0; font-weight:400; max-width:640px; text-wrap:balance;">${escHtml(settings.home_cta_title || 'Whether you need property management, OTA optimization, virtual support or real estate services — we are here to help.')}</h2>
-      <div style="display:flex; gap:14px; flex-wrap:wrap; justify-content:center;">
-        <a href="/contact" class="btn-primary whitespace-nowrap shrink-0">${escHtml(settings.home_cta_btn_text || 'Get in Touch')} <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
-        <a href="/hospitality" class="btn-outline whitespace-nowrap shrink-0">Explore Hospitality</a>
-      </div>
-    </div>
-  </section>
 `
 
   return layout('Purecrest | Hospitality Management, OTA Listing Optimization & Property Solutions Nigeria', content, '', settings)
@@ -4005,7 +3997,7 @@ function propertiesPage(properties: any[], total: number, page: number, limit: n
   const pages = Math.ceil(total / limit)
   const lagosAreas = ['Victoria Island', 'Lekki', 'Ikoyi', 'Ajah', 'Yaba', 'Surulere', 'Ikeja', 'Lagos Island', 'Apapa', 'Maryland', 'Gbagada', 'Magodo', 'Lekki Phase 1', 'Sangotedo', 'Isale Eko', 'Oniru']
   const abujaAreas = ['Maitama', 'Wuse 2', 'Asokoro', 'Jabi', 'Garki', 'Utako', 'Guzape', 'Lugbe', 'Kubwa', 'Kado', 'Apo', 'Gwarinpa', 'Katampe', 'Lokogoma', 'Kuje', 'Dawaki']
-  const enuguAreas = ['Independence Layout', 'New Haven', 'GRA Enugu', 'Trans-Ekulu', 'Achara Layout']
+  const portHarcourtAreas = ['New GRA', 'Old GRA', 'Woji', 'Peter Odili', 'Trans Amadi', 'Ada George', 'Rumuola']
 
   const content = `
   <!-- PROPERTIES HERO: Split Layout (image right, text left) -->
@@ -4018,7 +4010,7 @@ function propertiesPage(properties: any[], total: number, page: number, limit: n
             <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold); margin:0;">Premium Properties</p>
           </div>
           <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(2rem,4vw,3.2rem); line-height:1.1; color:#fff; margin-bottom:16px; font-weight:400;">Find Your Perfect<br/><em style="color:var(--gold); font-style:normal;">Property in Nigeria</em></h1>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; line-height:1.75; color:rgba(255,255,255,0.72); margin-bottom:28px; max-width:440px;">Browse premium properties for sale, rent, and short let across Lagos, Abuja, Enugu, and Nigeria. Your dream home awaits.</p>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; line-height:1.75; color:rgba(255,255,255,0.72); margin-bottom:28px; max-width:440px;">Browse premium properties for sale, rent, and short let across Lagos, Abuja, Port Harcourt, and Nigeria. Your dream home awaits.</p>
 
         </div>
         <!-- Right: Image -->
@@ -4050,7 +4042,7 @@ function propertiesPage(properties: any[], total: number, page: number, limit: n
         <div style="display:grid; grid-template-columns:2.5fr 1fr 1.5fr 1fr 1fr auto; gap:12px; align-items:end;" class="search-form-grid">
           <div style="display:flex; flex-direction:column; gap:4px;">
             <label style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.68rem; font-weight:700; color:#666; text-transform:uppercase; letter-spacing:0.06em;">Search</label>
-            <input type="text" name="q" value="${filters.search||''}" placeholder="Property name, area..." style="width:100%; padding:11px 14px; border:1.5px solid #e2e8f0; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; color:#1a1a1a; transition:border-color 0.2s;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
+            <input type="text" name="q" value="${filters.search||''}" style="width:100%; padding:11px 14px; border:1.5px solid #e2e8f0; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; color:#1a1a1a; transition:border-color 0.2s;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
           </div>
           <div style="display:flex; flex-direction:column; gap:4px;">
             <label style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.68rem; font-weight:700; color:#666; text-transform:uppercase; letter-spacing:0.06em;">Type</label>
@@ -4067,14 +4059,19 @@ function propertiesPage(properties: any[], total: number, page: number, limit: n
             <label style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.68rem; font-weight:700; color:#666; text-transform:uppercase; letter-spacing:0.06em;">Area</label>
             <select name="area" style="width:100%; padding:11px 14px; border:1.5px solid #e2e8f0; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; color:#1a1a1a;">
               <option value="">All Areas</option>
-              <optgroup label="— Enugu —">
-                ${enuguAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
+              <optgroup label="— Cities —">
+                <option value="Lagos" ${filters.area==='Lagos'?'selected':''}>Lagos</option>
+                <option value="Abuja" ${filters.area==='Abuja'?'selected':''}>Abuja</option>
+                <option value="Port Harcourt" ${filters.area==='Port Harcourt'?'selected':''}>Port Harcourt</option>
               </optgroup>
               <optgroup label="— Lagos —">
                 ${lagosAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
               </optgroup>
               <optgroup label="— Abuja (FCT) —">
                 ${abujaAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
+              </optgroup>
+              <optgroup label="— Port Harcourt —">
+                ${portHarcourtAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
               </optgroup>
             </select>
           </div>
@@ -4239,7 +4236,7 @@ function listingsPage(properties: any[], total: number, page: number, limit: num
   const pages = Math.ceil(total / limit)
   const lagosAreas = ['Victoria Island', 'Lekki', 'Ikoyi', 'Ajah', 'Yaba', 'Surulere', 'Ikeja', 'Lagos Island', 'Apapa', 'Maryland', 'Gbagada', 'Magodo', 'Lekki Phase 1', 'Sangotedo']
   const abujaAreas = ['Maitama', 'Wuse 2', 'Asokoro', 'Jabi', 'Garki', 'Utako', 'Guzape', 'Lugbe', 'Kubwa', 'Kado', 'Apo', 'Gwarinpa', 'Katampe', 'Lokogoma', 'Kuje']
-  const enuguAreas = ['Independence Layout', 'New Haven', 'GRA Enugu', 'Trans-Ekulu', 'Achara Layout']
+  const portHarcourtAreas = ['New GRA', 'Old GRA', 'Woji', 'Peter Odili', 'Trans Amadi', 'Ada George', 'Rumuola']
 
   const categoryLabels: Record<string, string> = {
     'buy': 'For Sale', 'rent': 'For Rent', 'short-let': 'Short Let', 'land': 'Land', 'commercial': 'Commercial'
@@ -4251,14 +4248,14 @@ function listingsPage(properties: any[], total: number, page: number, limit: num
     <div class="max-w-7xl mx-auto px-4 md:px-6 text-center">
       <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold); margin-bottom:12px;">All Listings</p>
       <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(1.8rem,4vw,2.8rem); color:#fff; font-weight:400; margin-bottom:12px;">Property Listings in Nigeria</h1>
-      <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; color:rgba(255,255,255,0.72); max-width:520px; margin:0 auto 32px;">Discover our full range of properties — apartments, houses, land and commercial spaces available across Lagos, Abuja, and Enugu.</p>
+      <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; color:rgba(255,255,255,0.72); max-width:520px; margin:0 auto 32px;">Discover our full range of properties — apartments, houses, land and commercial spaces available across Lagos, Abuja, and Port Harcourt.</p>
 
       <!-- FULL WIDTH SEARCH -->
       <form method="GET" action="/listings" style="background:#fff; border-radius:12px; padding:18px 20px; max-width:860px; margin:0 auto; box-shadow:0 8px 32px rgba(0,0,0,0.25);">
         <div style="display:grid; grid-template-columns:2fr 1fr 1fr auto; gap:12px; align-items:end;" class="listing-search-grid">
           <div>
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; color:#555; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:4px;">Search Properties</label>
-            <input type="text" name="q" value="${filters.search||''}" placeholder="Location, keywords..." style="width:100%; padding:10px 14px; border:1.5px solid #e2e8f0; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; color:#1a1a1a;" />
+            <input type="text" name="q" value="${filters.search||''}" style="width:100%; padding:10px 14px; border:1.5px solid #e2e8f0; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; color:#1a1a1a;" />
           </div>
           <div>
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; color:#555; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:4px;">Category</label>
@@ -4275,14 +4272,19 @@ function listingsPage(properties: any[], total: number, page: number, limit: num
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; color:#555; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:4px;">Area</label>
             <select name="area" style="width:100%; padding:10px 14px; border:1.5px solid #e2e8f0; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; outline:none; background:#fff; color:#1a1a1a;">
               <option value="">All Areas</option>
-              <optgroup label="— Enugu —">
-                ${enuguAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
+              <optgroup label="— Cities —">
+                <option value="Lagos" ${filters.area==='Lagos'?'selected':''}>Lagos</option>
+                <option value="Abuja" ${filters.area==='Abuja'?'selected':''}>Abuja</option>
+                <option value="Port Harcourt" ${filters.area==='Port Harcourt'?'selected':''}>Port Harcourt</option>
               </optgroup>
               <optgroup label="— Lagos —">
                 ${lagosAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
               </optgroup>
               <optgroup label="— Abuja (FCT) —">
                 ${abujaAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
+              </optgroup>
+              <optgroup label="— Port Harcourt —">
+                ${portHarcourtAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
               </optgroup>
             </select>
           </div>
@@ -4385,7 +4387,7 @@ function shortletsPage(properties: any[], total: number, page: number, limit: nu
   const pages = Math.ceil(total / limit)
   const lagosAreas = ['Victoria Island', 'Lekki', 'Ikoyi', 'Ajah', 'Yaba', 'Surulere', 'Ikeja', 'Lagos Island', 'Apapa', 'Maryland', 'Gbagada', 'Magodo', 'Lekki Phase 1', 'Sangotedo']
   const abujaAreas = ['Maitama', 'Wuse 2', 'Asokoro', 'Jabi', 'Garki', 'Utako', 'Guzape', 'Kubwa', 'Kado', 'Apo', 'Gwarinpa', 'Katampe', 'Lugbe', 'Kuje']
-  const enuguAreas = ['Independence Layout', 'New Haven', 'GRA Enugu', 'Trans-Ekulu', 'Achara Layout']
+  const portHarcourtAreas = ['New GRA', 'Old GRA', 'Woji', 'Peter Odili', 'Trans Amadi', 'Ada George', 'Rumuola']
   const today = new Date().toISOString().split('T')[0]
   const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0]
 
@@ -4399,7 +4401,7 @@ function shortletsPage(properties: any[], total: number, page: number, limit: nu
       <!-- Heading -->
       <div style="text-align:center; margin-bottom:36px; position:relative; z-index:2;">
         <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(2rem,5vw,3.4rem); color:#fff; font-weight:400; margin:0 0 14px; line-height:1.1;">Short Let Apartments<br/><em style="color:var(--gold); font-style:normal;">in Nigeria</em></h1>
-        <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; color:rgba(255,255,255,0.7); max-width:480px; margin:0 auto; line-height:1.75;">Fully furnished apartments and suites for nightly, weekly &amp; monthly stays across Enugu, Abuja, and Lagos.</p>
+        <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; color:rgba(255,255,255,0.7); max-width:480px; margin:0 auto; line-height:1.75;">Fully furnished apartments and suites for nightly, weekly &amp; monthly stays across Lagos, Abuja, and Port Harcourt.</p>
       </div>
 
       <!-- SEARCH FORM CARD -->
@@ -4433,14 +4435,19 @@ function shortletsPage(properties: any[], total: number, page: number, limit: nu
               <select name="area" style="width:100%; padding:10px 12px; border:1.5px solid #e2e8f0; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; color:#1a1a1a; background:#fafafa; outline:none; box-sizing:border-box;"
                 onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'">
                 <option value="">Any Area in Nigeria</option>
-                <optgroup label="── Enugu ──">
-                  ${enuguAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
+                <optgroup label="── Cities ──">
+                  <option value="Lagos" ${filters.area==='Lagos'?'selected':''}>Lagos</option>
+                  <option value="Abuja" ${filters.area==='Abuja'?'selected':''}>Abuja</option>
+                  <option value="Port Harcourt" ${filters.area==='Port Harcourt'?'selected':''}>Port Harcourt</option>
                 </optgroup>
                 <optgroup label="── Lagos ──">
                   ${lagosAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
                 </optgroup>
                 <optgroup label="── Abuja (FCT) ──">
                   ${abujaAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
+                </optgroup>
+                <optgroup label="── Port Harcourt ──">
+                  ${portHarcourtAreas.map(a => `<option value="${a}" ${filters.area===a?'selected':''}>${a}</option>`).join('')}
                 </optgroup>
               </select>
             </div>
@@ -4463,7 +4470,7 @@ function shortletsPage(properties: any[], total: number, page: number, limit: nu
             <!-- Search by name -->
             <div>
               <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.63rem; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:6px;">Search by Name</label>
-              <input type="text" name="q" value="${filters.search||''}" placeholder="e.g. Luxury 2-Bed Lekki..."
+              <input type="text" name="q" value="${filters.search||''}"
                 style="width:100%; padding:10px 12px; border:1.5px solid #e2e8f0; border-radius:8px; font-size:0.875rem; font-family:'Plus Jakarta Sans',sans-serif; color:#1a1a1a; background:#fafafa; outline:none; box-sizing:border-box;"
                 onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
             </div>
@@ -4594,7 +4601,7 @@ function shortletsPage(properties: any[], total: number, page: number, limit: nu
     </div>`}
   </div>`
 
-  return layout('Short Let Apartments in Lagos & Abuja | Purecrest', content)
+  return layout('Short Let Apartments in Lagos, Abuja & Port Harcourt | Purecrest', content)
 }
 
 // ==========================================
@@ -4741,10 +4748,22 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
           </button>
         </div>
         <form id="mobileInquiryForm" class="space-y-3">
-          <input type="text" id="mobileInqName" placeholder="Your Full Name *" class="w-full px-3 py-3 border rounded-xl text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
-          <input type="tel" id="mobileInqPhone" placeholder="Phone Number *" class="w-full px-3 py-3 border rounded-xl text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
-          <input type="email" id="mobileInqEmail" placeholder="Email (optional)" class="w-full px-3 py-3 border rounded-xl text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" />
-          <textarea id="mobileInqMsg" rows="3" placeholder="Your message..." class="w-full px-3 py-3 border rounded-xl text-sm focus:outline-none bg-gray-50 resize-none" style="border-color:#e2e8f0;">I am interested in this property. Please contact me.</textarea>
+          <div>
+            <label for="mobileInqName" class="block text-xs font-semibold text-gray-700 mb-1">Full Name *</label>
+            <input type="text" id="mobileInqName" class="w-full px-3 py-2.5 border rounded-xl text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
+          </div>
+          <div>
+            <label for="mobileInqPhone" class="block text-xs font-semibold text-gray-700 mb-1">Phone Number *</label>
+            <input type="tel" id="mobileInqPhone" class="w-full px-3 py-2.5 border rounded-xl text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
+          </div>
+          <div>
+            <label for="mobileInqEmail" class="block text-xs font-semibold text-gray-700 mb-1">Email (optional)</label>
+            <input type="email" id="mobileInqEmail" class="w-full px-3 py-2.5 border rounded-xl text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" />
+          </div>
+          <div>
+            <label for="mobileInqMsg" class="block text-xs font-semibold text-gray-700 mb-1">Message</label>
+            <textarea id="mobileInqMsg" rows="3" class="w-full px-3 py-2.5 border rounded-xl text-sm focus:outline-none bg-gray-50 resize-none" style="border-color:#e2e8f0;">I am interested in this property. Please contact me.</textarea>
+          </div>
           <button type="submit" class="w-full btn-gold text-white py-3 rounded-xl font-semibold text-sm">Send Enquiry</button>
         </form>
         <div id="mobileInqSuccess" class="hidden text-center py-4">
@@ -4801,8 +4820,8 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
             </p>
           </div>
 
-          <!-- Key Stats -->
-          ${prop.category !== 'land' ? `
+          <!-- Key Stats (non-shortlet only) -->
+          ${!isShortLet ? (prop.category !== 'land' ? `
           <div class="property-stats-grid grid grid-cols-3 sm:grid-cols-5 gap-3 py-4 border-y border-gray-100">
             ${prop.bedrooms > 0 ? `<div class="text-center"><p class="stat-val text-xl sm:text-2xl font-bold text-gray-800">${prop.bedrooms}</p><p class="text-xs text-gray-500">Bed${prop.bedrooms>1?'s':''}</p></div>` : ''}
             ${prop.bathrooms > 0 ? `<div class="text-center"><p class="stat-val text-xl sm:text-2xl font-bold text-gray-800">${prop.bathrooms}</p><p class="text-xs text-gray-500">Bath${prop.bathrooms>1?'s':''}</p></div>` : ''}
@@ -4813,7 +4832,7 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
           <div class="py-4 border-y border-gray-100">
             ${prop.size_sqm ? `<p class="text-gray-600 text-sm">Land Size: ${prop.size_sqm} sqm</p>` : ''}
             ${prop.year_built ? `<p class="text-gray-600 text-sm">Year: ${prop.year_built}</p>` : ''}
-          </div>`}
+          </div>`) : ''}
 
           <!-- Description -->
           <div class="mt-4">
@@ -5028,27 +5047,46 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
           <p class="text-sm text-gray-500 mb-4">Can't visit in person? Schedule a live video tour with our agent at your preferred time.</p>
           <div id="tourFormWrap">
             <form id="tourForm" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <input type="text" id="tourName" placeholder="Your Full Name *" class="px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
-              <input type="tel" id="tourPhone" placeholder="Phone Number *" class="px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
-              <input type="email" id="tourEmail" placeholder="Email (optional)" class="px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" />
-              <input type="date" id="tourDate" min="${today}" class="px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
-              <select id="tourTime" class="px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;">
-                <option value="09:00">9:00 AM</option>
-                <option value="10:00">10:00 AM</option>
-                <option value="11:00">11:00 AM</option>
-                <option value="12:00">12:00 PM</option>
-                <option value="14:00">2:00 PM</option>
-                <option value="15:00">3:00 PM</option>
-                <option value="16:00">4:00 PM</option>
-                <option value="17:00">5:00 PM</option>
-              </select>
-              <select id="tourType" class="px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;">
-                <option value="whatsapp_video">WhatsApp Video</option>
-                <option value="zoom">Zoom</option>
-                <option value="google_meet">Google Meet</option>
-              </select>
+              <div>
+                <label for="tourName" class="block text-xs font-semibold text-gray-700 mb-1">Full Name *</label>
+                <input type="text" id="tourName" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
+              </div>
+              <div>
+                <label for="tourPhone" class="block text-xs font-semibold text-gray-700 mb-1">Phone Number *</label>
+                <input type="tel" id="tourPhone" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
+              </div>
+              <div>
+                <label for="tourEmail" class="block text-xs font-semibold text-gray-700 mb-1">Email (optional)</label>
+                <input type="email" id="tourEmail" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" />
+              </div>
+              <div>
+                <label for="tourDate" class="block text-xs font-semibold text-gray-700 mb-1">Preferred Date *</label>
+                <input type="date" id="tourDate" min="${today}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
+              </div>
+              <div>
+                <label for="tourTime" class="block text-xs font-semibold text-gray-700 mb-1">Preferred Time</label>
+                <select id="tourTime" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;">
+                  <option value="09:00">9:00 AM</option>
+                  <option value="10:00">10:00 AM</option>
+                  <option value="11:00">11:00 AM</option>
+                  <option value="12:00">12:00 PM</option>
+                  <option value="14:00">2:00 PM</option>
+                  <option value="15:00">3:00 PM</option>
+                  <option value="16:00">4:00 PM</option>
+                  <option value="17:00">5:00 PM</option>
+                </select>
+              </div>
+              <div>
+                <label for="tourType" class="block text-xs font-semibold text-gray-700 mb-1">Tour Platform</label>
+                <select id="tourType" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;">
+                  <option value="whatsapp_video">WhatsApp Video</option>
+                  <option value="zoom">Zoom</option>
+                  <option value="google_meet">Google Meet</option>
+                </select>
+              </div>
               <div class="sm:col-span-2">
-                <textarea id="tourMsg" rows="2" placeholder="Any message or preference..." class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;"></textarea>
+                <label for="tourMsg" class="block text-xs font-semibold text-gray-700 mb-1">Message or Preference</label>
+                <textarea id="tourMsg" rows="2" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;"></textarea>
               </div>
               <div class="sm:col-span-2">
                 <button type="submit" class="w-full btn-gold text-white py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2">
@@ -5246,31 +5284,11 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
                   </div>
                 </div>
 
-                <!-- Optional Concierge Add-ons -->
-                <div>
-                  <label class="text-xs font-bold uppercase tracking-wide text-gray-700 block mb-1.5">4. Concierge Add-Ons <span class="font-normal text-gray-400 normal-case">(optional)</span></label>
-                  <div class="space-y-1.5 text-xs">
-                    ${[
-                      ['airport_pickup', 'Airport Chauffeur Pickup', '+₦25,000'],
-                      ['early_late', 'Early Check-in & Late Check-out', '+₦15,000'],
-                      ['breakfast_chef', 'Daily Breakfast / Private Chef', '+₦12,000 / night'],
-                      ['laundry', 'Express Laundry & Pressing', '+₦8,000'],
-                    ].map(([val, lbl, priceTxt]) => `
-                    <label class="flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg border border-gray-200 hover:border-[#C9A84C] bg-[#faf9f6] cursor-pointer">
-                      <span class="flex items-center gap-2 text-gray-700 font-medium">
-                        <input type="checkbox" class="bk-addon accent-[#051C12]" value="${val}" onchange="calcBookingTotals()" />
-                        ${lbl}
-                      </span>
-                      <span class="font-semibold text-[#051C12] tabular-nums whitespace-nowrap">${priceTxt}</span>
-                    </label>`).join('')}
-                  </div>
-                </div>
-
                 <!-- Promo / Corporate Code -->
                 <div>
-                  <label class="text-[11px] font-semibold text-gray-600 block mb-1">Promo Code <span class="text-gray-400 font-normal">(e.g. PURECREST10, RICHGATE15 · 7+ nights 10% off)</span></label>
+                  <label for="promoCodeInput" class="text-[11px] font-semibold text-gray-600 block mb-1">Promo Code <span class="text-gray-400 font-normal">(e.g. PURECREST10, RICHGATE15 · 7+ nights 10% off)</span></label>
                   <div class="flex gap-1.5">
-                    <input type="text" id="promoCodeInput" placeholder="Enter code" class="flex-1 px-2.5 py-2 border border-gray-300 rounded-lg text-xs uppercase bg-gray-50 focus:outline-none focus:border-[#C9A84C]" />
+                    <input type="text" id="promoCodeInput" class="flex-1 px-2.5 py-2 border border-gray-300 rounded-lg text-xs uppercase bg-gray-50 focus:outline-none focus:border-[#C9A84C]" />
                     <button type="button" onclick="applyPromoCode()" class="px-3 py-2 rounded-lg bg-[#051C12] text-white text-xs font-bold cursor-pointer">Apply</button>
                   </div>
                   <p id="promoFeedback" class="hidden text-[11px] mt-1 font-medium"></p>
@@ -5279,25 +5297,39 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
                 <!-- Itemized Live Pricing Summary -->
                 <div id="priceCalc" class="rounded-xl p-3.5 text-xs bg-[#f5f3ee] border border-[#e3ddd0] space-y-1.5 tabular-nums">
                   <div class="flex justify-between text-gray-700"><span id="roomCalcLabel">Suite × 1 night</span><span id="subtotalPrice">₦0</span></div>
-                  <div id="addonsRow" class="hidden flex justify-between text-gray-700"><span>Concierge Add-ons</span><span id="addonsPrice">₦0</span></div>
                   <div id="discountRow" class="hidden flex justify-between text-emerald-700 font-semibold"><span id="discountLabel">Discount</span><span id="discountAmount">-₦0</span></div>
                   <div class="flex justify-between font-bold text-sm border-t border-[#dfd9cc] pt-2 text-[#051C12]"><span>Estimated Total</span><span id="totalPrice">₦0</span></div>
                 </div>
 
                 <!-- Guest Contact & Payment Preference -->
                 <div class="space-y-2.5 pt-1">
-                  <label class="text-xs font-bold uppercase tracking-wide text-gray-700 block">5. Guest &amp; Payment Details</label>
-                  <input type="text" id="guestName" placeholder="Full Name *" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-[#C9A84C] bg-gray-50" required />
-                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <input type="tel" id="guestPhone" placeholder="Phone / WhatsApp *" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-[#C9A84C] bg-gray-50" required />
-                    <input type="email" id="guestEmail" placeholder="Email Address" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-[#C9A84C] bg-gray-50" />
+                  <p class="text-xs font-bold uppercase tracking-wide text-gray-700">4. Guest &amp; Payment Details</p>
+                  <div>
+                    <label for="guestName" class="text-[11px] font-semibold text-gray-600 block mb-1">Full Name *</label>
+                    <input type="text" id="guestName" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-[#C9A84C] bg-gray-50" required />
                   </div>
-                  <select id="paymentMethod" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs font-medium bg-gray-50 focus:outline-none">
-                    <option value="transfer">Bank Transfer (Instant Reservation Hold)</option>
-                    <option value="arrival">Reserve Now, Pay at Check-in</option>
-                    <option value="corporate">Corporate / Company Invoice</option>
-                  </select>
-                  <textarea id="guestRequests" rows="2" placeholder="Special requests (dietary notes, flight number, extra pillows)..." class="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs bg-gray-50 focus:outline-none focus:border-[#C9A84C] resize-none"></textarea>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label for="guestPhone" class="text-[11px] font-semibold text-gray-600 block mb-1">Phone / WhatsApp *</label>
+                      <input type="tel" id="guestPhone" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-[#C9A84C] bg-gray-50" required />
+                    </div>
+                    <div>
+                      <label for="guestEmail" class="text-[11px] font-semibold text-gray-600 block mb-1">Email Address</label>
+                      <input type="email" id="guestEmail" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-[#C9A84C] bg-gray-50" />
+                    </div>
+                  </div>
+                  <div>
+                    <label for="paymentMethod" class="text-[11px] font-semibold text-gray-600 block mb-1">Payment Method</label>
+                    <select id="paymentMethod" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs font-medium bg-gray-50 focus:outline-none">
+                      <option value="transfer">Bank Transfer (Instant Reservation Hold)</option>
+                      <option value="arrival">Reserve Now, Pay at Check-in</option>
+                      <option value="corporate">Corporate / Company Invoice</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="guestRequests" class="text-[11px] font-semibold text-gray-600 block mb-1">Special Requests</label>
+                    <textarea id="guestRequests" rows="2" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs bg-gray-50 focus:outline-none focus:border-[#C9A84C] resize-none"></textarea>
+                  </div>
                 </div>
 
                 <div id="bookingError" class="hidden text-xs px-3 py-2 rounded-lg bg-red-50 text-red-700 border border-red-200 font-medium"></div>
@@ -5522,29 +5554,16 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
                 var rate = rm ? rm.price_per_night : PROP_BASE_RATE;
                 var subtotal = rate * nights;
 
-                var addonPrices = { airport_pickup: 25000, early_late: 15000, breakfast_chef: 12000 * Math.max(1, nights), laundry: 8000 };
-                var addonsTotal = 0;
-                document.querySelectorAll('.bk-addon:checked').forEach(function(cb) {
-                  addonsTotal += (addonPrices[cb.value] || 0);
-                });
-
                 var discountRate = 0;
                 var discountLbl = '';
                 if (activePromo === 'RICHGATE15') { discountRate = 0.15; discountLbl = 'Promo (RICHGATE15 · 15%)'; }
                 else if (activePromo === 'PURECREST10') { discountRate = 0.10; discountLbl = 'Promo (PURECREST10 · 10%)'; }
                 else if (nights >= 7) { discountRate = 0.10; discountLbl = 'Extended Stay Discount (10%)'; }
                 var discountAmt = Math.round(subtotal * discountRate);
-                var grandTotal = Math.max(0, subtotal - discountAmt + addonsTotal);
+                var grandTotal = Math.max(0, subtotal - discountAmt);
 
                 document.getElementById('roomCalcLabel').textContent = (rm ? rm.room_name : 'Rate') + ' × ' + nights + ' night' + (nights === 1 ? '' : 's');
                 document.getElementById('subtotalPrice').textContent = '₦' + subtotal.toLocaleString('en-NG');
-                var aRow = document.getElementById('addonsRow');
-                if (addonsTotal > 0) {
-                  aRow.classList.remove('hidden');
-                  document.getElementById('addonsPrice').textContent = '+₦' + addonsTotal.toLocaleString('en-NG');
-                } else {
-                  aRow.classList.add('hidden');
-                }
                 var dRow = document.getElementById('discountRow');
                 if (discountAmt > 0) {
                   dRow.classList.remove('hidden');
@@ -5617,7 +5636,6 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
                 btn.textContent = 'Confirming Reservation...';
 
                 var rm = getRoom(currentRoomId);
-                var addons = Array.from(document.querySelectorAll('.bk-addon:checked')).map(function(cb) { return cb.value; });
                 var payload = {
                   property_id: PROP_ID,
                   listing_id: PROP_LIST_ID,
@@ -5631,7 +5649,6 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
                   guests: adultsCount + childrenCount,
                   arrival_time: document.getElementById('arrivalTime').value,
                   stay_purpose: document.getElementById('stayPurpose').value,
-                  addons: addons,
                   promo_code: activePromo || (document.getElementById('promoCodeInput')?.value || '').trim(),
                   payment_method: document.getElementById('paymentMethod').value,
                   requests: document.getElementById('guestRequests').value,
@@ -5676,10 +5693,22 @@ function propertyDetailPage(prop: any, similar: any[], agent: any, videos: any[]
           <div class="bg-white rounded-2xl shadow-md p-5">
             <h3 class="banner-h2 font-bold text-gray-800 mb-4 text-base">Enquire About This Property</h3>
             <form id="inquiryForm" class="space-y-3">
-              <input type="text" id="inquiryName" placeholder="Your Full Name *" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
-              <input type="tel" id="inquiryPhone" placeholder="Phone Number *" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
-              <input type="email" id="inquiryEmail" placeholder="Email (optional)" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" />
-              <textarea id="inquiryMsg" rows="3" placeholder="Your message..." class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50 resize-none" style="border-color:#e2e8f0;">I am interested in this property. Please contact me.</textarea>
+              <div>
+                <label for="inquiryName" class="block text-xs font-semibold text-gray-700 mb-1">Full Name *</label>
+                <input type="text" id="inquiryName" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
+              </div>
+              <div>
+                <label for="inquiryPhone" class="block text-xs font-semibold text-gray-700 mb-1">Phone Number *</label>
+                <input type="tel" id="inquiryPhone" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" required />
+              </div>
+              <div>
+                <label for="inquiryEmail" class="block text-xs font-semibold text-gray-700 mb-1">Email (optional)</label>
+                <input type="email" id="inquiryEmail" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50" style="border-color:#e2e8f0;" />
+              </div>
+              <div>
+                <label for="inquiryMsg" class="block text-xs font-semibold text-gray-700 mb-1">Message</label>
+                <textarea id="inquiryMsg" rows="3" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none bg-gray-50 resize-none" style="border-color:#e2e8f0;">I am interested in this property. Please contact me.</textarea>
+              </div>
               <button type="submit" class="w-full btn-gold text-white py-3 rounded-xl font-semibold text-sm">Send Enquiry</button>
             </form>
             <div id="inquirySuccess" class="hidden text-center py-4">
@@ -5928,7 +5957,7 @@ function areasPage(areaCounts: any[]): string {
       <h1 class="banner-h1 text-4xl font-black text-gray-900 mb-2">Browse by Area</h1>
       <p class="text-gray-500">Explore properties across Abuja's best neighbourhoods</p>
     </div>
-    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
       ${areaCounts.length > 0 ? areaCounts.map((a: any) => {
         const info = areaData[a.area] || { image: 'https://images.unsplash.com/photo-1512917774080-9991f1c4c750?w=600', desc: 'Properties available in this area' }
         return `
@@ -5970,7 +5999,6 @@ function areasPage(areaCounts: any[]): string {
 // CONTACT PAGE
 // ==========================================
 function contactPage(settings: Record<string, string> = {}): string {
-  const officeAddr = escHtml(settings.office_address || 'Abuja, Federal Capital Territory, Nigeria')
   const email = escHtml(settings.contact_email || 'hello@purecrest.ng')
   const waNum = settings.whatsapp_number || '+2349130403970'
   const waDigits = waNum.replace(/[^0-9]/g, '') || '2349130403970'
@@ -5990,19 +6018,10 @@ function contactPage(settings: Record<string, string> = {}): string {
 
         <!-- Left: Info -->
         <div>
-          <h2 style="font-family:'DM Serif Display',serif; font-size:1.75rem; color:var(--forest); margin-bottom:8px; font-weight:400;">Our Office</h2>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; color:#666; margin-bottom:32px; line-height:1.7;">${escHtml(settings.contact_office_intro || "Visit us, call us, or send a message — we're available to help you navigate your real estate and hospitality journey.")}</p>
+          <h2 style="font-family:'DM Serif Display',serif; font-size:1.75rem; color:var(--forest); margin-bottom:8px; font-weight:400;">Get in Touch</h2>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; color:#666; margin-bottom:32px; line-height:1.7;">${escHtml(settings.contact_office_intro || "Call us, chat on WhatsApp, or send a message — we're available to help you navigate your real estate and hospitality journey.")}</p>
 
           <div style="display:flex; flex-direction:column; gap:20px; margin-bottom:36px;">
-            <div style="display:flex; align-items:flex-start; gap:16px;">
-              <div style="width:44px; height:44px; border-radius:50%; background:rgba(5,28,18,0.08); display:flex; align-items:center; justify-content:center; flex-shrink:0;">
-                <i class="fas fa-map-marker-alt" style="color:var(--gold); font-size:0.9rem;"></i>
-              </div>
-              <div>
-                <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.75rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:#888; margin-bottom:4px;">Location</p>
-                <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; color:#333; line-height:1.5;">${officeAddr}</p>
-              </div>
-            </div>
             <div style="display:flex; align-items:flex-start; gap:16px;">
               <div style="width:44px; height:44px; border-radius:50%; background:rgba(5,28,18,0.08); display:flex; align-items:center; justify-content:center; flex-shrink:0;">
                 <i class="fas fa-envelope" style="color:var(--gold); font-size:0.9rem;"></i>
@@ -6023,9 +6042,9 @@ function contactPage(settings: Record<string, string> = {}): string {
             </div>
           </div>
 
-          <!-- Office Hours -->
+          <!-- Support Hours -->
           <div style="background:var(--forest); border-radius:8px; padding:24px;">
-            <h4 style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:var(--gold); margin-bottom:14px;">Office Hours</h4>
+            <h4 style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:var(--gold); margin-bottom:14px;">Support Hours</h4>
             <div style="display:flex; flex-direction:column; gap:8px;">
               <div style="display:flex; justify-content:space-between; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.85rem;">
                 <span style="color:rgba(255,255,255,0.65);">Monday – Friday</span>
@@ -6802,19 +6821,19 @@ function trainingPage(settings: Record<string, string> = {}): string {
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;" class="training-form-grid">
             <div>
               <label style="display:block;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.8rem;font-weight:600;color:#444;margin-bottom:6px;">Full Name *</label>
-              <input type="text" id="tName" required placeholder="Your full name" style="width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;outline:none;box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
+              <input type="text" id="tName" required style="width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;outline:none;box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
             </div>
             <div>
               <label style="display:block;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.8rem;font-weight:600;color:#444;margin-bottom:6px;">WhatsApp / Phone *</label>
-              <input type="tel" id="tPhone" required placeholder="+234 xxx xxx xxxx" style="width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;outline:none;box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
+              <input type="tel" id="tPhone" required style="width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;outline:none;box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
             </div>
             <div>
               <label style="display:block;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.8rem;font-weight:600;color:#444;margin-bottom:6px;">Email Address</label>
-              <input type="email" id="tEmail" placeholder="you@example.com" style="width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;outline:none;box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
+              <input type="email" id="tEmail" style="width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;outline:none;box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
             </div>
             <div>
               <label style="display:block;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.8rem;font-weight:600;color:#444;margin-bottom:6px;">Organisation / Hotel Name</label>
-              <input type="text" id="tOrg" placeholder="Your hotel or business name" style="width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;outline:none;box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
+              <input type="text" id="tOrg" style="width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;outline:none;box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
             </div>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;" class="training-form-grid">
@@ -6842,7 +6861,7 @@ function trainingPage(settings: Record<string, string> = {}): string {
           </div>
           <div style="margin-bottom:24px;">
             <label style="display:block;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.8rem;font-weight:600;color:#444;margin-bottom:6px;">Additional Message</label>
-            <textarea id="tMessage" rows="4" placeholder="Tell us about your team, preferred dates, location, or any special requirements..." style="width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;outline:none;resize:vertical;box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'"></textarea>
+            <textarea id="tMessage" rows="4" style="width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;outline:none;resize:vertical;box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'"></textarea>
           </div>
           <button type="submit" id="trainingSubmitBtn" style="display:inline-flex;align-items:center;gap:10px;padding:14px 36px;background:linear-gradient(135deg,var(--gold),#A8883A);color:#1a1a1a;border:none;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.9rem;font-weight:700;cursor:pointer;transition:opacity 0.2s;" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">
             <i class="fas fa-paper-plane"></i> Submit Training Request
@@ -6901,12 +6920,13 @@ function trainingPage(settings: Record<string, string> = {}): string {
 // SERVICES OVERVIEW PAGE
 // ==========================================
 function servicesPage(settings: Record<string, string> = {}): string {
+  const sImg3 = settings.service_img_solutions || '/assets/aistudio/3C945DE4-8BB6-448E-8828-635AEAEE8958_d7ecfef0.png'
   const content = `
   <!-- Hero -->
   <section style="background:var(--forest); padding:80px 0 70px;">
     <div class="max-w-7xl mx-auto px-6 text-center">
       <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(2rem,4.5vw,3.5rem); color:#fff; font-weight:400; margin-bottom:18px; line-height:1.1;">${escHtml(settings.svc_hero_title || 'Our Services')}</h1>
-      <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:1rem; color:rgba(255,255,255,0.65); max-width:560px; margin:0 auto; line-height:1.7;">${escHtml(settings.svc_hero_subtitle || 'Three powerful business lines working together to deliver exceptional value — hospitality management, real estate solutions, and business advisory.')}</p>
+      <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:1rem; color:rgba(255,255,255,0.65); max-width:560px; margin:0 auto; line-height:1.7;">${escHtml(settings.svc_hero_subtitle || 'Three powerful business lines working together to deliver exceptional value — hospitality management, property services, and hospitality technology.')}</p>
     </div>
   </section>
 
@@ -6925,22 +6945,32 @@ function servicesPage(settings: Record<string, string> = {}): string {
           </ul>
           <a href="/hospitality" class="btn-primary">Explore Hospitality <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
         </div>
-        <div style="background:var(--forest); border-radius:12px; padding:48px; color:#fff; text-align:center;">
-          <h3 style="font-family:'DM Serif Display',serif; font-size:1.4rem; color:#fff; margin-bottom:14px; font-weight:400;">Premium Hospitality</h3>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; line-height:1.8; color:rgba(255,255,255,0.65);">From boutique hotels to serviced apartments, we manage properties that delight guests and deliver superior returns for property owners.</p>
-          <div style="margin-top:24px; padding-top:24px; border-top:1px solid rgba(255,255,255,0.1);">
-            <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; color:var(--gold); letter-spacing:0.1em; text-transform:uppercase;">Serving Nigeria</span>
+        <div style="background:var(--forest); border-radius:12px; overflow:hidden; color:#fff; text-align:center; border:1px solid rgba(201,168,76,0.22);">
+          <div style="padding:48px 36px;">
+            <div style="width:52px;height:52px;border-radius:12px;background:rgba(201,168,76,0.14);border:1px solid rgba(201,168,76,0.3);display:inline-flex;align-items:center;justify-content:center;margin-bottom:20px;">
+              <i class="fas fa-hotel" style="color:var(--gold);font-size:1.2rem;"></i>
+            </div>
+            <h3 style="font-family:'DM Serif Display',serif; font-size:1.5rem; color:#fff; margin-bottom:12px; font-weight:400;">Premium Hospitality</h3>
+            <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; line-height:1.8; color:rgba(255,255,255,0.68);">From boutique hotels to serviced apartments, we manage properties that delight guests and deliver superior returns for property owners.</p>
+            <div style="margin-top:24px; padding-top:18px; border-top:1px solid rgba(255,255,255,0.1);">
+              <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; color:var(--gold); letter-spacing:0.1em; text-transform:uppercase;">Lagos · Abuja · Port Harcourt</span>
+            </div>
           </div>
         </div>
       </div>
 
       <!-- Property -->
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:60px; align-items:center; margin-bottom:100px;" class="svc-row svc-row-reverse">
-        <div style="background:var(--navy); border-radius:12px; padding:48px; color:#fff; text-align:center;">
-          <h3 style="font-family:'DM Serif Display',serif; font-size:1.4rem; color:#fff; margin-bottom:14px; font-weight:400;">Real Estate Solutions</h3>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; line-height:1.8; color:rgba(255,255,255,0.65);">We connect buyers, sellers, tenants, and investors with the right properties and strategic advisory that drives real estate success.</p>
-          <div style="margin-top:24px; padding-top:24px; border-top:1px solid rgba(255,255,255,0.1);">
-            <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; color:var(--gold); letter-spacing:0.1em; text-transform:uppercase;">Lagos &amp; Abuja</span>
+        <div style="background:var(--navy); border-radius:12px; overflow:hidden; color:#fff; text-align:center; border:1px solid rgba(201,168,76,0.22);">
+          <div style="padding:48px 36px;">
+            <div style="width:52px;height:52px;border-radius:12px;background:rgba(201,168,76,0.14);border:1px solid rgba(201,168,76,0.3);display:inline-flex;align-items:center;justify-content:center;margin-bottom:20px;">
+              <i class="fas fa-building" style="color:var(--gold);font-size:1.2rem;"></i>
+            </div>
+            <h3 style="font-family:'DM Serif Display',serif; font-size:1.5rem; color:#fff; margin-bottom:12px; font-weight:400;">Property Sales &amp; Leasing</h3>
+            <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; line-height:1.8; color:rgba(255,255,255,0.68);">We connect buyers, sellers, tenants, and investors with the right properties and strategic advisory that drives real estate success.</p>
+            <div style="margin-top:24px; padding-top:18px; border-top:1px solid rgba(255,255,255,0.1);">
+              <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; color:var(--gold); letter-spacing:0.1em; text-transform:uppercase;">Lagos · Abuja · Port Harcourt</span>
+            </div>
           </div>
         </div>
         <div>
@@ -6955,26 +6985,28 @@ function servicesPage(settings: Record<string, string> = {}): string {
         </div>
       </div>
 
-      <!-- Solutions / Technology -->
+      <!-- Technology -->
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:60px; align-items:center;" class="svc-row">
         <div>
-          <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.8rem,3vw,2.5rem); color:var(--forest); margin-bottom:20px; font-weight:400; line-height:1.15;">Purecrest Solutions &amp; Technology</h2>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.85; color:#555; margin-bottom:24px;">${escHtml(settings.svc_sol_body || 'We help businesses grow through strategic branding, digital marketing, and powerful technology — including web development, booking systems, and hospitality software that power our wider operations.')}</p>
+          <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.8rem,3vw,2.5rem); color:var(--forest); margin-bottom:20px; font-weight:400; line-height:1.15;">Pure Crest Technology</h2>
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.85; color:#555; margin-bottom:24px;">${escHtml(settings.svc_sol_body || 'We engineer web platforms, booking engines, and hospitality software — including Purecrest Hotel PMS — that power modern hotels, serviced apartments, and property businesses.')}</p>
           <ul style="list-style:none; padding:0; margin:0 0 28px;">
-            ${['Brand Strategy & Identity Design','Digital Marketing & Social Media','Website Design & Development','Booking Systems & Reservations','Hospitality Software Solutions','Digital Solutions & Integrations'].map(item =>
+            ${['Hotel Property Management System (PCHPMS)','Direct Booking Engines & Reservations','Custom Hospitality Websites','Channel Manager & OTA Sync','Guest Analytics & Revenue Dashboards','Digital Integrations'].map(item =>
               `<li style="display:flex; align-items:center; gap:10px; margin-bottom:10px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#333;"><i class="fas fa-check" style="color:var(--gold); font-size:0.75rem; flex-shrink:0;"></i>${item}</li>`
             ).join('')}
           </ul>
           <div style="display:flex; gap:12px; flex-wrap:wrap;">
-            <a href="/solutions" class="btn-primary">Explore Solutions <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
-            <a href="/technology" class="btn-outline" style="background:transparent; border-color:var(--forest); color:var(--forest);" onmouseover="this.style.background='var(--forest)'; this.style.color='#fff';" onmouseout="this.style.background='transparent'; this.style.color='var(--forest)';">Pure Crest Technology</a>
+            <a href="/technology" class="btn-primary">Explore Pure Crest Technology <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
           </div>
         </div>
-        <div style="background:linear-gradient(135deg,#0a1628,#0B1F3A); border-radius:12px; padding:48px; color:#fff; text-align:center;">
-          <h3 style="font-family:'DM Serif Display',serif; font-size:1.4rem; color:#fff; margin-bottom:14px; font-weight:400;">Digital Solutions</h3>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; line-height:1.8; color:rgba(255,255,255,0.65);">From branding and marketing to booking systems and hospitality software — we build the digital infrastructure that drives Purecrest and our clients forward.</p>
-          <div style="margin-top:24px; padding-top:24px; border-top:1px solid rgba(255,255,255,0.1);">
-            <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; color:var(--gold); letter-spacing:0.1em; text-transform:uppercase;">Nigeria-Wide</span>
+        <div style="background:linear-gradient(135deg,#0a1628,#0B1F3A); border-radius:12px; overflow:hidden; color:#fff; text-align:center;">
+          <div style="height:220px; overflow:hidden;"><img src="${escHtml(sImg3)}" alt="Pure Crest Technology" style="width:100%;height:100%;object-fit:cover;display:block;" onerror="this.style.display='none'" /></div>
+          <div style="padding:32px 36px;">
+            <h3 style="font-family:'DM Serif Display',serif; font-size:1.4rem; color:#fff; margin-bottom:12px; font-weight:400;">Hospitality &amp; Property Software</h3>
+            <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; line-height:1.8; color:rgba(255,255,255,0.68);">From direct booking systems to full hotel PMS platforms — we build the digital infrastructure that drives Purecrest and our clients forward.</p>
+            <div style="margin-top:20px; padding-top:18px; border-top:1px solid rgba(255,255,255,0.1);">
+              <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; color:var(--gold); letter-spacing:0.1em; text-transform:uppercase;">Nigeria-Wide</span>
+            </div>
           </div>
         </div>
       </div>
@@ -7002,13 +7034,10 @@ function servicesPage(settings: Record<string, string> = {}): string {
 // HOSPITALITY PAGE
 // ==========================================
 function hospitalityPage(settings: Record<string, string> = {}): string {
-  const hospHeroImg = settings.hospitality_hero_image || 'https://images.unsplash.com/photo-1566073771259-6a8506099945?w=1400&q=80'
-  const hospPartnerImg = settings.hospitality_partner_image || 'https://images.unsplash.com/photo-1455587734955-081b22074882?w=900&q=80'
   const content = `
   <!-- HERO -->
-  <section style="background:var(--forest); position:relative; overflow:hidden; min-height:520px; display:flex; align-items:center;">
-    <div style="position:absolute; inset:0; background-image:url('${hospHeroImg}'); background-size:cover; background-position:center;" id="hospHeroBg"></div>
-    <div style="position:absolute; inset:0; background:linear-gradient(105deg, rgba(5,28,18,0.92) 0%, rgba(5,28,18,0.78) 55%, rgba(11,31,58,0.65) 100%);"></div>
+  <section style="background:var(--forest); position:relative; overflow:hidden; min-height:460px; display:flex; align-items:center;">
+    <div style="position:absolute; inset:0; background:linear-gradient(105deg, rgba(5,28,18,0.98) 0%, rgba(5,28,18,0.9) 55%, rgba(11,31,58,0.88) 100%);"></div>
     <div style="position:absolute; left:0; top:0; bottom:0; width:4px; background:linear-gradient(to bottom, transparent, var(--gold), transparent);"></div>
     <div class="max-w-7xl mx-auto px-6 w-full" style="position:relative; z-index:2; padding-top:90px; padding-bottom:90px;">
       <div style="max-width:680px;">
@@ -7083,8 +7112,22 @@ function hospitalityPage(settings: Record<string, string> = {}): string {
           <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:1.05rem; font-weight:600; color:var(--gold); margin-bottom:20px; line-height:1.4;">Your Property. Our Management. Better Hospitality.</p>
           <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; line-height:1.9; color:#555; margin:0;">Pure Crest Hospitality partners with independent and growing hotel owners to professionally manage, reposition and grow their properties through stronger operations, revenue strategy, marketing, technology and ethical hospitality standards.</p>
         </div>
-        <div style="border-radius:14px; overflow:hidden; min-height:380px; box-shadow:0 8px 40px rgba(0,0,0,0.12);">
-          <img src="${hospPartnerImg}" alt="Hotel Management Partnership" style="width:100%; height:100%; min-height:380px; object-fit:cover;" loading="lazy" />
+        <div style="background:var(--forest); border-radius:14px; padding:38px 32px; color:#fff; border:1px solid rgba(201,168,76,0.25); box-shadow:0 8px 32px rgba(0,0,0,0.08);">
+          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.16em; text-transform:uppercase; color:var(--gold); margin-bottom:18px;">PARTNERSHIP PILLARS</p>
+          <div style="display:flex; flex-direction:column; gap:18px;">
+            <div style="padding-bottom:16px; border-bottom:1px solid rgba(255,255,255,0.1);">
+              <h3 style="font-family:'DM Serif Display',serif; font-size:1.15rem; color:#fff; margin:0 0 6px; font-weight:400;">Operations &amp; Staff SOPs</h3>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.84rem; color:rgba(255,255,255,0.7); margin:0; line-height:1.6;">End-to-end daily management, training, and hospitality quality assurance.</p>
+            </div>
+            <div style="padding-bottom:16px; border-bottom:1px solid rgba(255,255,255,0.1);">
+              <h3 style="font-family:'DM Serif Display',serif; font-size:1.15rem; color:#fff; margin:0 0 6px; font-weight:400;">OTA &amp; Direct Revenue Growth</h3>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.84rem; color:rgba(255,255,255,0.7); margin:0; line-height:1.6;">Channel optimisation across Airbnb, Booking.com, Expedia, and direct bookings.</p>
+            </div>
+            <div>
+              <h3 style="font-family:'DM Serif Display',serif; font-size:1.15rem; color:#fff; margin:0 0 6px; font-weight:400;">Transparent Owner Reporting</h3>
+              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.84rem; color:rgba(255,255,255,0.7); margin:0; line-height:1.6;">Monthly performance statements with clear occupancy and net yield metrics.</p>
+            </div>
+          </div>
         </div>
       </div>
       <style>@media (max-width:900px) { .partner-intro-grid { grid-template-columns:1fr !important; gap:40px !important; } }</style>
@@ -7159,16 +7202,20 @@ function hospitalityPage(settings: Record<string, string> = {}): string {
         <div style="background:rgba(255,255,255,0.05); border-radius:12px; padding:40px; border:1px solid rgba(255,255,255,0.1);">
           <h3 style="font-family:'DM Serif Display',serif; font-size:1.4rem; color:#fff; margin-bottom:24px; font-weight:400;">List Your Property With Us</h3>
           <form id="hostForm">
-            <div style="margin-bottom:16px;">
-              <input type="text" id="hostName" placeholder="Your Full Name" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
+            <div style="margin-bottom:14px;">
+              <label for="hostName" style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.78rem; font-weight:600; color:rgba(255,255,255,0.78); margin-bottom:6px;">Your Full Name *</label>
+              <input type="text" id="hostName" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
             </div>
-            <div style="margin-bottom:16px;">
-              <input type="tel" id="hostPhone" placeholder="Phone Number" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
+            <div style="margin-bottom:14px;">
+              <label for="hostPhone" style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.78rem; font-weight:600; color:rgba(255,255,255,0.78); margin-bottom:6px;">Phone Number *</label>
+              <input type="tel" id="hostPhone" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
             </div>
-            <div style="margin-bottom:16px;">
-              <input type="email" id="hostEmail" placeholder="Email Address" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
+            <div style="margin-bottom:14px;">
+              <label for="hostEmail" style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.78rem; font-weight:600; color:rgba(255,255,255,0.78); margin-bottom:6px;">Email Address</label>
+              <input type="email" id="hostEmail" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
             </div>
-            <div style="margin-bottom:16px;">
+            <div style="margin-bottom:14px;">
+              <label for="hostPropType" style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.78rem; font-weight:600; color:rgba(255,255,255,0.78); margin-bottom:6px;">Property Type</label>
               <select id="hostPropType" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none;">
                 <option value="">Property Type</option>
                 <option value="hotel">Hotel</option>
@@ -7179,7 +7226,8 @@ function hospitalityPage(settings: Record<string, string> = {}): string {
               </select>
             </div>
             <div style="margin-bottom:20px;">
-              <textarea id="hostMsg" rows="3" placeholder="Tell us about your property..." style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; resize:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'"></textarea>
+              <label for="hostMsg" style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.78rem; font-weight:600; color:rgba(255,255,255,0.78); margin-bottom:6px;">Tell Us About Your Property</label>
+              <textarea id="hostMsg" rows="3" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; resize:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'"></textarea>
             </div>
             <button type="submit" style="width:100%; padding:14px; background:var(--gold); color:#fff; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; font-weight:700; border:none; border-radius:6px; cursor:pointer; transition:background 0.2s;" onmouseover="this.style.background='var(--gold-dark)'" onmouseout="this.style.background='var(--gold)'">
               Submit Enquiry
@@ -7236,13 +7284,11 @@ function hospitalityPage(settings: Record<string, string> = {}): string {
 // PROPERTY SERVICES PAGE
 // ==========================================
 function propertyServicesPage(settings: Record<string, string> = {}): string {
-  const propHeroImg = settings.property_hero_image || ''
   const content = `
   <!-- Hero -->
   <section style="background:var(--navy); padding:80px 0 70px; position:relative; overflow:hidden;">
-    ${propHeroImg ? `<div style="position:absolute; inset:0; background-image:url('${escHtml(propHeroImg)}'); background-size:cover; background-position:center; opacity:0.25;"></div><div style="position:absolute; inset:0; background:linear-gradient(105deg, rgba(11,31,58,0.92), rgba(5,28,18,0.8));"></div>` : ''}
     <div class="max-w-7xl mx-auto px-6 text-center" style="position:relative; z-index:2;">
-      <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(2rem,4.5vw,3.5rem); color:#fff; font-weight:400; margin-bottom:18px; line-height:1.1;">${formatMultiline(settings.prop_hero_title, 'Real Estate Solutions\nThat Create Value')}</h1>
+      <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(2rem,4.5vw,3.5rem); color:#fff; font-weight:400; margin-bottom:18px; line-height:1.1;">${formatMultiline(settings.prop_hero_title, 'Property Sales, Leasing\n& Advisory')}</h1>
       <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:1rem; color:rgba(255,255,255,0.65); max-width:580px; margin:0 auto 32px; line-height:1.7;">${escHtml(settings.prop_hero_subtitle || 'We connect buyers, sellers, tenants, and investors with premium residential and commercial properties across Nigeria — with expert advisory at every step.')}</p>
       <div style="display:flex; gap:14px; justify-content:center; flex-wrap:wrap;">
         <a href="/properties" class="btn-primary">Browse Properties <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
@@ -7321,148 +7367,7 @@ function propertyServicesPage(settings: Record<string, string> = {}): string {
   return layout('Purecrest Property', content, '', settings)
 }
 
-// ==========================================
-// SOLUTIONS PAGE
-// ==========================================
-function solutionsPage(settings: Record<string, string> = {}): string {
-  const solHeroImg = settings.solutions_hero_image || ''
-  const content = `
-  <!-- Hero -->
-  <section style="background:linear-gradient(135deg,#1a0e05,#2d1a08); padding:80px 0 70px; position:relative; overflow:hidden;">
-    ${solHeroImg ? `<div style="position:absolute; inset:0; background-image:url('${escHtml(solHeroImg)}'); background-size:cover; background-position:center; opacity:0.22;"></div><div style="position:absolute; inset:0; background:linear-gradient(135deg,rgba(26,14,5,0.9),rgba(45,26,8,0.82));"></div>` : ''}
-    <div class="max-w-7xl mx-auto px-6 text-center" style="position:relative; z-index:2;">
-      <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(2rem,4.5vw,3.5rem); color:#fff; font-weight:400; margin-bottom:18px; line-height:1.1;">${formatMultiline(settings.sol_hero_title, 'Grow Your Business\nwith Purecrest Solutions')}</h1>
-      <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:1rem; color:rgba(255,255,255,0.65); max-width:600px; margin:0 auto 32px; line-height:1.7;">${escHtml(settings.sol_hero_subtitle || 'We help businesses, startups, and investors achieve clarity, visibility, and growth through strategic branding, digital marketing, web development, and business consulting.')}</p>
-      <div style="display:flex; gap:14px; justify-content:center; flex-wrap:wrap;">
-        <a href="/contact" class="btn-primary">Contact Us <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
-        <a href="/invest" class="btn-outline">Invest With Us</a>
-      </div>
-    </div>
-  </section>
-
-  <!-- Core Solutions -->
-  <section style="background:#fff; padding:90px 0;">
-    <div class="max-w-7xl mx-auto px-6">
-      <div style="text-align:center; margin-bottom:60px;">
-        <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold); margin-bottom:12px;">WHAT WE DO</p>
-        <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.6rem,3vw,2.2rem); color:var(--forest); margin:0; font-weight:400;">Our Core Solution Areas</h2>
-      </div>
-
-      <!-- Branding -->
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:60px; align-items:center; margin-bottom:80px; padding-bottom:80px; border-bottom:1px solid #f0ede8;" class="sol-row">
-        <div>
-          <div style="display:inline-flex; align-items:center; gap:10px; background:rgba(201,168,76,0.1); border-radius:50px; padding:8px 18px; margin-bottom:20px;">
-            <i class="fas fa-palette" style="color:var(--gold);"></i>
-            <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.75rem; font-weight:700; letter-spacing:0.1em; text-transform:uppercase; color:var(--gold);">Branding</span>
-          </div>
-          <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.6rem,3vw,2.2rem); color:var(--forest); margin-bottom:18px; font-weight:400; line-height:1.2;">Brand Strategy &amp; Identity Design</h2>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.85; color:#555; margin-bottom:24px;">We create powerful brand identities that make businesses memorable. From logo design and brand guidelines to full visual identity systems, we build brands that stand out and connect with the right audience.</p>
-          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:28px;">
-            ${['Logo Design & Identity','Brand Style Guides','Visual Identity Systems','Brand Strategy & Positioning','Packaging Design','Corporate Stationery'].map(item =>
-              `<div style="display:flex; align-items:center; gap:8px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; color:#444;"><i class="fas fa-check" style="color:var(--gold); font-size:0.7rem;"></i>${item}</div>`
-            ).join('')}
-          </div>
-          <a href="/contact?service=branding" class="btn-primary" style="background:var(--forest);">Get Branding Quote <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
-        </div>
-        <div style="background:linear-gradient(135deg,var(--forest),var(--forest-mid)); border-radius:16px; padding:48px; text-align:center; color:#fff;">
-          <i class="fas fa-palette" style="font-size:3.5rem; color:var(--gold); display:block; margin-bottom:24px;"></i>
-          <h3 style="font-family:'DM Serif Display',serif; font-size:1.4rem; margin-bottom:12px; font-weight:400;">Build a Brand That Lasts</h3>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:rgba(255,255,255,0.65); line-height:1.8;">Your brand is your most valuable asset. We help you build it right — from the very first impression to long-term recognition.</p>
-        </div>
-      </div>
-
-      <!-- Marketing -->
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:60px; align-items:center; margin-bottom:80px; padding-bottom:80px; border-bottom:1px solid #f0ede8;" class="sol-row sol-row-rev">
-        <div style="background:linear-gradient(135deg,var(--navy),#0d2444); border-radius:16px; padding:48px; text-align:center; color:#fff;">
-          <i class="fas fa-bullhorn" style="font-size:3.5rem; color:var(--gold); display:block; margin-bottom:24px;"></i>
-          <h3 style="font-family:'DM Serif Display',serif; font-size:1.4rem; margin-bottom:12px; font-weight:400;">Drive Growth &amp; Visibility</h3>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:rgba(255,255,255,0.65); line-height:1.8;">We create and execute marketing strategies that attract, engage, and convert your target audience across digital and traditional channels.</p>
-        </div>
-        <div>
-          <div style="display:inline-flex; align-items:center; gap:10px; background:rgba(201,168,76,0.1); border-radius:50px; padding:8px 18px; margin-bottom:20px;">
-            <i class="fas fa-bullhorn" style="color:var(--gold);"></i>
-            <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.75rem; font-weight:700; letter-spacing:0.1em; text-transform:uppercase; color:var(--gold);">Marketing</span>
-          </div>
-          <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.6rem,3vw,2.2rem); color:var(--forest); margin-bottom:18px; font-weight:400; line-height:1.2;">Digital Marketing &amp; Growth Strategy</h2>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.85; color:#555; margin-bottom:24px;">We develop and execute data-driven digital marketing campaigns that increase brand awareness, drive traffic, generate leads, and convert customers — all with measurable results.</p>
-          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:28px;">
-            ${['Social Media Management','Search Engine Optimisation (SEO)','Paid Advertising (Google/Meta)','Email Marketing Campaigns','Content Strategy & Creation','Analytics & Reporting'].map(item =>
-              `<div style="display:flex; align-items:center; gap:8px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; color:#444;"><i class="fas fa-check" style="color:var(--gold); font-size:0.7rem;"></i>${item}</div>`
-            ).join('')}
-          </div>
-          <a href="/contact?service=marketing" class="btn-primary" style="background:var(--navy);">Get Marketing Quote <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
-        </div>
-      </div>
-
-      <!-- Web Development -->
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:60px; align-items:center;" class="sol-row">
-        <div>
-          <div style="display:inline-flex; align-items:center; gap:10px; background:rgba(201,168,76,0.1); border-radius:50px; padding:8px 18px; margin-bottom:20px;">
-            <i class="fas fa-code" style="color:var(--gold);"></i>
-            <span style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.75rem; font-weight:700; letter-spacing:0.1em; text-transform:uppercase; color:var(--gold);">Web Development</span>
-          </div>
-          <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.6rem,3vw,2.2rem); color:var(--forest); margin-bottom:18px; font-weight:400; line-height:1.2;">Modern Website &amp; App Development</h2>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; line-height:1.85; color:#555; margin-bottom:24px;">We design and develop high-performance websites and web applications that look stunning, load fast, and convert visitors into customers. From landing pages to full e-commerce platforms.</p>
-          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:28px;">
-            ${['Business & Corporate Websites','E-Commerce Platforms','Landing Page Design','Web Application Development','CMS & Admin Dashboards','SEO-Ready Architecture'].map(item =>
-              `<div style="display:flex; align-items:center; gap:8px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; color:#444;"><i class="fas fa-check" style="color:var(--gold); font-size:0.7rem;"></i>${item}</div>`
-            ).join('')}
-          </div>
-          <a href="/contact?service=web-development" class="btn-primary">Get Web Dev Quote <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
-        </div>
-        <div style="background:linear-gradient(135deg,#1a0e05,#2d1a08); border-radius:16px; padding:48px; text-align:center; color:#fff;">
-          <i class="fas fa-laptop-code" style="font-size:3.5rem; color:var(--gold); display:block; margin-bottom:24px;"></i>
-          <h3 style="font-family:'DM Serif Display',serif; font-size:1.4rem; margin-bottom:12px; font-weight:400;">Your Digital Presence, Perfected</h3>
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:rgba(255,255,255,0.65); line-height:1.8;">We build fast, secure, and beautiful web experiences that work on every device — designed to convert visitors into loyal customers.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-  <style>
-    @media (max-width:900px) { .sol-row { grid-template-columns:1fr !important; } .sol-row-rev > *:first-child { order:2; } }
-  </style>
-
-  <!-- Additional Services -->
-  <section style="background:var(--cream); padding:80px 0;">
-    <div class="max-w-7xl mx-auto px-6">
-      <div style="text-align:center; margin-bottom:48px;">
-        <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold); margin-bottom:12px;">MORE SOLUTIONS</p>
-        <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.6rem,3vw,2.2rem); color:var(--forest); margin:0; font-weight:400;">Additional Business Services</h2>
-      </div>
-      <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:24px;" class="add-sol-grid">
-        ${[
-          {icon:'fa-bullseye', title:'Brand Strategy', desc:'Strategic guidance for positioning, messaging, and market differentiation that makes your brand stand out and connect with your target audience.'},
-          {icon:'fa-users', title:'Training & Capacity Building', desc:'Professional development programmes for hospitality, real estate, and business management teams to elevate service standards.'},
-          {icon:'fa-cogs', title:'Digital Integrations', desc:'Custom integrations between booking systems, hospitality software, and third-party platforms to streamline operations and improve efficiency.'},
-        ].map(s => `
-          <div style="background:#fff; border-radius:8px; padding:32px; border:1px solid #e8e8e4;">
-            <div style="width:52px; height:52px; border-radius:8px; background:rgba(5,28,18,0.07); display:flex; align-items:center; justify-content:center; margin-bottom:18px;">
-              <i class="fas ${s.icon}" style="color:var(--gold); font-size:1.1rem;"></i>
-            </div>
-            <h3 style="font-family:'DM Serif Display',serif; font-size:1.1rem; color:var(--forest); margin-bottom:10px; font-weight:400;">${s.title}</h3>
-            <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; line-height:1.7; color:#666;">${s.desc}</p>
-          </div>
-        `).join('')}
-      </div>
-    </div>
-  </section>
-  <style>
-    @media (max-width:768px) { .add-sol-grid { grid-template-columns:1fr !important; } }
-  </style>
-
-  <!-- CTA -->
-  <section style="background:var(--forest); padding:72px 0; text-align:center;">
-    <div class="max-w-4xl mx-auto px-6">
-      <h2 style="font-family:'DM Serif Display',serif; font-size:clamp(1.8rem,3.5vw,2.8rem); color:#fff; margin-bottom:16px; font-weight:400;">${escHtml(settings.sol_cta_title || 'Ready to Grow Your Business?')}</h2>
-      <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; color:rgba(255,255,255,0.65); margin-bottom:32px; max-width:480px; margin-left:auto; margin-right:auto;">${escHtml(settings.sol_cta_subtitle || "Let's talk about how Purecrest Solutions can help you achieve your business goals.")}</p>
-      <div style="display:flex; gap:14px; justify-content:center; flex-wrap:wrap;">
-        <a href="/contact" class="btn-primary">Start a Conversation <i class="fas fa-arrow-right" style="font-size:0.75rem;"></i></a>
-        <a href="/technology" class="btn-outline">Pure Crest Technology</a>
-      </div>
-    </div>
-  </section>`
-  return layout('Purecrest Solutions', content, '', settings)
-}
+// (Solutions page removed — /solutions redirects to /services)
 
 // ==========================================
 // OTA LISTING OPTIMIZATION PAGE
@@ -7612,7 +7517,7 @@ function otaListingPage(settings: Record<string, string> = {}): string {
 // HOSPITALITY VIRTUAL SUPPORT PAGE
 // ==========================================
 function virtualSupportPage(settings: Record<string, string> = {}): string {
-  const vsHeroImg = settings.vs_hero_image || '/static/service-hospitality.jpg'
+  const vsHeroImg = settings.vs_hero_image || '/assets/aistudio/F1834A2C-2DF3-4AEB-8A69-8229BB53CCAC_9dec0e0c.png'
   const content = `
   <!-- SEO: Hospitality Virtual Support Services -->
   <!-- HERO -->
@@ -7773,12 +7678,12 @@ function virtualSupportPage(settings: Record<string, string> = {}): string {
 // PURE CREST TECHNOLOGY PAGE
 // ==========================================
 function technologyPage(settings: Record<string, string> = {}): string {
-  const techHeroImg = settings.technology_hero_image || ''
+  const techHeroImg = settings.technology_hero_image || '/assets/aistudio/3C945DE4-8BB6-448E-8828-635AEAEE8958_d7ecfef0.png'
   const pmsUrl = settings.tech_pms_url || settings.pms_banner_cta_url || 'https://pchpms.com'
   const content = `
   <!-- HERO -->
   <section style="background:linear-gradient(135deg,#040e1c,#0B1F3A); position:relative; overflow:hidden; min-height:560px; display:flex; align-items:center;">
-    ${techHeroImg ? `<div style="position:absolute; inset:0; background-image:url('${escHtml(techHeroImg)}'); background-size:cover; background-position:center; opacity:0.45;"></div>` : `<div style="position:absolute; inset:0; background-image:url('/static/service-solutions.jpg'); background-size:cover; background-position:center; opacity:0.35;"></div>`}
+    <div style="position:absolute; inset:0; background-image:url('${escHtml(techHeroImg)}'); background-size:cover; background-position:center; opacity:0.45;"></div>
     <!-- Dark overlay for readability -->
     <div style="position:absolute; inset:0; background:linear-gradient(105deg, rgba(4,14,28,0.92) 0%, rgba(11,31,58,0.78) 55%, rgba(4,14,28,0.65) 100%);"></div>
     <!-- Gold accent lines -->
@@ -8016,7 +7921,7 @@ function projectsPage(properties: any[]): string {
   <section style="background:var(--cream); padding:80px 0;">
     <div class="max-w-7xl mx-auto px-6">
       ${properties.length > 0 ? `
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
         ${properties.map(propertyCard).join('')}
       </div>
       <div style="text-align:center; margin-top:40px;">
@@ -8137,16 +8042,16 @@ function careersPage(jobs: any[]): string {
           <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;" class="career-form-grid">
             <div>
               <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">Full Name *</label>
-              <input type="text" id="careerName" required placeholder="Your full name" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
+              <input type="text" id="careerName" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
             </div>
             <div>
               <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">Phone Number *</label>
-              <input type="tel" id="careerPhone" required placeholder="+234 800 000 0000" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
+              <input type="tel" id="careerPhone" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
             </div>
           </div>
           <div style="margin-bottom:16px;">
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">Email Address *</label>
-            <input type="email" id="careerEmail" required placeholder="you@example.com" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
+            <input type="email" id="careerEmail" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
           </div>
           <div style="margin-bottom:16px;">
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">Position Applied For *</label>
@@ -8167,11 +8072,11 @@ function careersPage(jobs: any[]): string {
           </div>
           <div style="margin-bottom:16px;">
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">LinkedIn or Portfolio URL</label>
-            <input type="url" id="careerLinkedin" placeholder="https://linkedin.com/in/yourname" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
+            <input type="url" id="careerLinkedin" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
           </div>
           <div style="margin-bottom:24px;">
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">Cover Letter / Why Purecrest? *</label>
-            <textarea id="careerCover" rows="5" required placeholder="Tell us about yourself, your relevant experience, and why you want to join Purecrest..." style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; resize:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'"></textarea>
+            <textarea id="careerCover" rows="5" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; resize:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'"></textarea>
           </div>
           <button type="submit" style="width:100%; padding:14px; background:var(--gold); color:#fff; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; font-weight:700; border:none; border-radius:6px; cursor:pointer; transition:background 0.2s;" onmouseover="this.style.background='#a8883a'" onmouseout="this.style.background='var(--gold)'">
             <i class="fas fa-paper-plane" style="margin-right:8px;"></i>Submit Application
@@ -8310,16 +8215,16 @@ function jobDetailPage(job: any): string {
           <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;" class="apply-grid">
             <div>
               <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">Full Name *</label>
-              <input type="text" id="applyName" required placeholder="Your full name" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
+              <input type="text" id="applyName" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
             </div>
             <div>
               <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">Phone Number *</label>
-              <input type="tel" id="applyPhone" required placeholder="+234 800 000 0000" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
+              <input type="tel" id="applyPhone" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
             </div>
           </div>
           <div style="margin-bottom:16px;">
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">Email Address *</label>
-            <input type="email" id="applyEmail" required placeholder="you@example.com" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
+            <input type="email" id="applyEmail" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
           </div>
           <div style="margin-bottom:16px;">
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">Years of Experience</label>
@@ -8333,11 +8238,11 @@ function jobDetailPage(job: any): string {
           </div>
           <div style="margin-bottom:16px;">
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">LinkedIn or Portfolio URL</label>
-            <input type="url" id="applyLinkedin" placeholder="https://linkedin.com/in/yourname" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
+            <input type="url" id="applyLinkedin" style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'" />
           </div>
           <div style="margin-bottom:24px;">
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">Cover Letter / Why Purecrest? *</label>
-            <textarea id="applyCover" rows="5" required placeholder="Tell us about yourself, your relevant experience, and why you want to join Purecrest..." style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; resize:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'"></textarea>
+            <textarea id="applyCover" rows="5" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; resize:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'"></textarea>
           </div>
           <button type="submit" style="width:100%; padding:14px; background:var(--gold); color:#fff; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; font-weight:700; border:none; border-radius:6px; cursor:pointer;" onmouseover="this.style.opacity='0.88'" onmouseout="this.style.opacity='1'">
             <i class="fas fa-paper-plane" style="margin-right:8px;"></i>Submit Application
@@ -8486,7 +8391,7 @@ function adminJobFormPage(job: any): string {
 
       <div>
         <label class="block text-sm font-semibold text-gray-700 mb-1.5">Job Title *</label>
-        <input type="text" name="title" required value="${v('title')}" placeholder="e.g. Property Sales Executive" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:border-yellow-400 text-sm bg-gray-50" />
+        <input type="text" name="title" required value="${v('title')}" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:border-yellow-400 text-sm bg-gray-50" />
       </div>
 
       <div class="grid grid-cols-2 gap-4">
@@ -8511,23 +8416,23 @@ function adminJobFormPage(job: any): string {
       <div class="grid grid-cols-2 gap-4">
         <div>
           <label class="block text-sm font-semibold text-gray-700 mb-1.5">Location</label>
-          <input type="text" name="location" value="${v('location') || 'Abuja, Nigeria'}" placeholder="e.g. Abuja, Nigeria" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:border-yellow-400 text-sm bg-gray-50" />
+          <input type="text" name="location" value="${v('location') || 'Abuja, Nigeria'}" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:border-yellow-400 text-sm bg-gray-50" />
         </div>
         <div>
           <label class="block text-sm font-semibold text-gray-700 mb-1.5">Salary Range <span class="font-normal text-gray-400">(optional)</span></label>
-          <input type="text" name="salary_range" value="${v('salary_range')}" placeholder="e.g. ₦200,000–₦350,000/month" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:border-yellow-400 text-sm bg-gray-50" />
+          <input type="text" name="salary_range" value="${v('salary_range')}" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:border-yellow-400 text-sm bg-gray-50" />
         </div>
       </div>
 
       <div>
         <label class="block text-sm font-semibold text-gray-700 mb-1.5">Job Description *</label>
-        <textarea name="description" rows="7" required placeholder="Describe the role, responsibilities, and what the day-to-day looks like..." class="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:border-yellow-400 text-sm bg-gray-50 resize-y">${v('description')}</textarea>
+        <textarea name="description" rows="7" required class="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:border-yellow-400 text-sm bg-gray-50 resize-y">${v('description')}</textarea>
         <p class="text-xs text-gray-400 mt-1">Markdown not required — plain text is fine. Line breaks are preserved.</p>
       </div>
 
       <div>
         <label class="block text-sm font-semibold text-gray-700 mb-1.5">Requirements <span class="font-normal text-gray-400">(one per line)</span></label>
-        <textarea name="requirements" rows="6" placeholder="Bachelor's degree in any relevant field&#10;Minimum 2 years of experience&#10;Excellent communication skills&#10;Self-motivated and target-driven" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:border-yellow-400 text-sm bg-gray-50 resize-y">${v('requirements')}</textarea>
+        <textarea name="requirements" rows="6" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:border-yellow-400 text-sm bg-gray-50 resize-y">${v('requirements')}</textarea>
         <p class="text-xs text-gray-400 mt-1">Each line will be shown as a separate bullet point on the job detail page.</p>
       </div>
 
@@ -8672,21 +8577,21 @@ function investPage(settings: Record<string, string> = {}): string {
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;" class="inv-form-grid">
               <div>
                 <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:#444; margin-bottom:6px;">Full Name *</label>
-                <input type="text" id="invName" required placeholder="Your full name" style="width:100%; padding:12px 14px; border:1.5px solid #e2e8f0; border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
+                <input type="text" id="invName" required style="width:100%; padding:12px 14px; border:1.5px solid #e2e8f0; border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
               </div>
               <div>
                 <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:#444; margin-bottom:6px;">Phone Number *</label>
-                <input type="tel" id="invPhone" required placeholder="+234 800 000 0000" style="width:100%; padding:12px 14px; border:1.5px solid #e2e8f0; border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
+                <input type="tel" id="invPhone" required style="width:100%; padding:12px 14px; border:1.5px solid #e2e8f0; border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
               </div>
             </div>
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;" class="inv-form-grid">
               <div>
                 <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:#444; margin-bottom:6px;">Email Address *</label>
-                <input type="email" id="invEmail" required placeholder="you@example.com" style="width:100%; padding:12px 14px; border:1.5px solid #e2e8f0; border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
+                <input type="email" id="invEmail" required style="width:100%; padding:12px 14px; border:1.5px solid #e2e8f0; border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
               </div>
               <div>
                 <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:#444; margin-bottom:6px;">Company / Organisation</label>
-                <input type="text" id="invCompany" placeholder="Your company name (optional)" style="width:100%; padding:12px 14px; border:1.5px solid #e2e8f0; border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
+                <input type="text" id="invCompany" style="width:100%; padding:12px 14px; border:1.5px solid #e2e8f0; border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; outline:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'" />
               </div>
             </div>
           </div>
@@ -8795,7 +8700,7 @@ function investPage(settings: Record<string, string> = {}): string {
             <h4 style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:700; letter-spacing:0.1em; text-transform:uppercase; color:#888; margin-bottom:16px; border-bottom:1px solid #f0ede8; padding-bottom:10px;">Additional Information</h4>
             <div>
               <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:#444; margin-bottom:6px;">Message / Specific Questions *</label>
-              <textarea id="invMessage" rows="5" required placeholder="Tell us more about your investment goals, any specific properties or opportunities you're interested in, or any questions you have for our investment advisory team..." style="width:100%; padding:12px 14px; border:1.5px solid #e2e8f0; border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; outline:none; resize:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'"></textarea>
+              <textarea id="invMessage" rows="5" required style="width:100%; padding:12px 14px; border:1.5px solid #e2e8f0; border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; outline:none; resize:none;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'"></textarea>
             </div>
           </div>
 
@@ -9163,7 +9068,7 @@ function submitPropertyPage(settings: Record<string, string> = {}, errorMsg: str
 }
 
 function findMyHomePage(settings: Record<string, string> = {}, errorMsg: string = ''): string {
-  const areas = ['Maitama','Wuse 2','Asokoro','Jabi','Garki','Utako','Guzape','Lugbe','Kubwa','Gwarinpa','Victoria Island','Lekki','Ikoyi','Ajah','Yaba','Ikeja','Any / No Preference']
+  const areas = ['Maitama','Wuse 2','Asokoro','Jabi','Garki','Utako','Guzape','Lugbe','Kubwa','Gwarinpa','Victoria Island','Lekki','Ikoyi','Ajah','Yaba','Ikeja','New GRA','Old GRA','Woji','Peter Odili','Any / No Preference']
   const content = `
   <section style="background:linear-gradient(135deg, var(--forest) 0%, var(--forest-mid) 100%); padding:64px 0 56px;">
     <div class="max-w-3xl mx-auto px-6 text-center">
@@ -9207,7 +9112,12 @@ function findMyHomePage(settings: Record<string, string> = {}, errorMsg: string 
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">City *</label>
-          <input type="text" name="city" required placeholder="e.g. Abuja, Lagos" class="w-full px-4 py-3 border rounded-xl text-sm focus:outline-none" style="border-color:#e2e8f0;" />
+          <select name="city" required class="w-full px-4 py-3 border rounded-xl text-sm bg-white focus:outline-none" style="border-color:#e2e8f0;">
+            <option value="Lagos">Lagos</option>
+            <option value="Abuja">Abuja</option>
+            <option value="Port Harcourt">Port Harcourt</option>
+            <option value="Other Nigeria">Other Nigerian City</option>
+          </select>
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Preferred Area</label>
@@ -9241,7 +9151,7 @@ function findMyHomePage(settings: Record<string, string> = {}, errorMsg: string 
         </div>
         <div class="sm:col-span-2">
           <label class="block text-sm font-medium text-gray-700 mb-1">Additional Details</label>
-          <textarea name="additional_details" rows="4" class="w-full px-4 py-3 border rounded-xl text-sm focus:outline-none" style="border-color:#e2e8f0;" placeholder="Tell us more about what you're looking for..."></textarea>
+          <textarea name="additional_details" rows="4" class="w-full px-4 py-3 border rounded-xl text-sm focus:outline-none" style="border-color:#e2e8f0;"></textarea>
         </div>
       </div>
       <button type="submit" class="w-full btn-gold py-4 rounded-xl font-semibold text-white" style="background:linear-gradient(135deg,var(--gold),var(--gold-dark));">Submit Request <i class="fas fa-arrow-right ml-1"></i></button>
@@ -9446,7 +9356,7 @@ function adminSubmissionsPage(submissions: any[], currentStatus: string): string
             <div class="bg-red-50 rounded-xl border border-red-100 p-4">
               <p class="text-xs font-semibold text-red-700 mb-2">Rejection Reason</p>
               <form method="POST" action="/admin/submissions/${s.id}/reject" class="flex gap-2 items-start">
-                <textarea name="notes" rows="2" placeholder="Reason for rejection (optional)..." class="flex-1 px-3 py-2 border rounded-lg text-xs focus:outline-none bg-white" style="border-color:#fca5a5;"></textarea>
+                <textarea name="notes" rows="2" class="flex-1 px-3 py-2 border rounded-lg text-xs focus:outline-none bg-white" style="border-color:#fca5a5;"></textarea>
                 <button type="submit" class="text-xs bg-red-600 text-white px-3 py-2 rounded-lg font-medium whitespace-nowrap hover:bg-red-700">Confirm Reject</button>
                 <button type="button" onclick="document.getElementById('rejectForm-${s.id}').classList.add('hidden')" class="text-xs text-gray-400 px-2 py-2 hover:text-gray-600">Cancel</button>
               </form>
@@ -9567,7 +9477,7 @@ function adminSubmissionDetailPage(s: any): string {
           </div>
           <script id="rejectFormTpl" type="text/template">
             <form method="POST" action="/admin/submissions/${s.id}/reject" class="space-y-2">
-              <textarea name="notes" rows="3" placeholder="Reason for rejection (shown in admin notes)..." class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" autofocus></textarea>
+              <textarea name="notes" rows="3" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" autofocus></textarea>
               <button type="submit" class="w-full bg-red-600 text-white py-2 rounded-xl font-semibold text-sm">Confirm Rejection</button>
             </form>
           </script>
@@ -9883,6 +9793,9 @@ function adminLayout(title: string, content: string, activeSection: string = '')
     <header class="bg-white border-b border-slate-200/80 px-6 py-3.5 flex items-center justify-between sticky top-0 z-10">
       <h1 class="text-xl font-normal text-slate-900" style="font-family:'DM Serif Display',serif;">${title}</h1>
       <div class="flex items-center gap-2.5 text-sm text-slate-600">
+        <a href="/admin/dashboard" class="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors ${activeSection==='dashboard'?'bg-emerald-50 border-emerald-300 text-emerald-800':'text-slate-700'}">
+          <i class="fas fa-tachometer-alt text-emerald-600"></i>Dashboard
+        </a>
         <a href="/admin/cms" class="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors ${activeSection==='cms'?'bg-amber-50 border-amber-300 text-amber-800':'text-slate-700'}">
           <i class="fas fa-pen-nib text-amber-500"></i>Site CMS
         </a>
@@ -9891,6 +9804,9 @@ function adminLayout(title: string, content: string, activeSection: string = '')
         </a>
         <a href="/admin/analytics" class="hidden sm:inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg hover:bg-slate-100 transition-colors ${activeSection==='analytics'?'bg-violet-50 text-violet-600':''}">
           <i class="fas fa-chart-line text-violet-500"></i>Analytics
+        </a>
+        <a href="/admin/login" class="hidden md:inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-600">
+          <i class="fas fa-sign-in-alt text-slate-500"></i>Login
         </a>
         <div class="flex items-center gap-1.5 pl-2 border-l border-slate-200 text-xs font-semibold text-slate-700">
           <i class="fas fa-user-shield" style="color: var(--gold);"></i><span>Admin</span>
@@ -9951,15 +9867,20 @@ function adminLoginPage(error?: string): string {
     <form method="POST" action="/admin/login" class="space-y-4">
       <div>
         <label class="block text-sm font-semibold text-gray-700 mb-1">Username / Email</label>
-        <input type="text" name="username" placeholder="Enter your username" class="w-full px-4 py-3 border rounded-xl focus:outline-none bg-gray-50 focus:border-green-400 transition-colors" style="border-color:#e2e8f0;" required autocomplete="username" />
+        <input type="text" name="username" class="w-full px-4 py-3 border rounded-xl focus:outline-none bg-gray-50 focus:border-green-400 transition-colors" style="border-color:#e2e8f0;" required autocomplete="username" />
       </div>
       <div>
         <label class="block text-sm font-semibold text-gray-700 mb-1">Password</label>
-        <input type="password" name="password" placeholder="Enter your password" class="w-full px-4 py-3 border rounded-xl focus:outline-none bg-gray-50 focus:border-green-400 transition-colors" style="border-color:#e2e8f0;" required autocomplete="current-password" />
+        <input type="password" name="password" class="w-full px-4 py-3 border rounded-xl focus:outline-none bg-gray-50 focus:border-green-400 transition-colors" style="border-color:#e2e8f0;" required autocomplete="current-password" />
       </div>
       <button type="submit" class="w-full btn-gold py-3 rounded-xl font-semibold">Sign In to Admin Panel</button>
     </form>
     <p class="text-center text-xs text-gray-400 mt-6">Access restricted to authorised personnel only.<br/>Contact your administrator if you need access.</p>
+    <div class="flex items-center justify-center gap-4 mt-4 pt-4 border-t border-gray-100 text-xs">
+      <a href="/admin/dashboard" class="font-semibold text-slate-700 hover:text-amber-600">Admin Dashboard</a>
+      <span class="text-gray-300">|</span>
+      <a href="/" class="font-semibold text-slate-500 hover:text-slate-800">Back to Website</a>
+    </div>
   </div>
 </body>
 </html>`
@@ -10059,9 +9980,8 @@ function adminDashboardPage(stats: any, properties: any[], inquiries: any[]): st
           <div id="dashboardCardUploadStatus" class="hidden text-xs font-medium rounded-lg px-3 py-2"></div>
           ${[
             {key:'hero_bg_image', label:'Homepage Hero Background', icon:'fa-panorama', color:'amber'},
-            {key:'service_img_hospitality', label:'Hospitality Service Card', icon:'fa-hotel', color:'green'},
-            {key:'service_img_property', label:'Property Service Card', icon:'fa-building', color:'blue'},
-            {key:'service_img_solutions', label:'Technology / Solutions Card', icon:'fa-laptop-code', color:'purple'},
+            {key:'service_img_solutions', label:'Pure Crest Technology Card', icon:'fa-laptop-code', color:'purple'},
+            {key:'service_img_virtual_support', label:'Virtual Support Service Card', icon:'fa-headset', color:'teal'},
             {key:'pms_banner_image', label:'Hotel PMS Showcase Visual', icon:'fa-desktop', color:'indigo'},
           ].map(({key,label,icon,color}) => `
           <label class="flex items-center gap-3 cursor-pointer p-2.5 rounded-lg hover:bg-slate-50 border border-slate-100 hover:border-amber-300 transition-all group">
@@ -10213,7 +10133,7 @@ function adminPropertiesPage(properties: any[], total: number, page: number, lim
     </a>
   </div>
   <form method="GET" action="/admin/properties" class="flex gap-3 mb-5">
-    <input type="text" name="q" value="${filters.search||''}" placeholder="Search title, area, ID..." class="flex-1 px-4 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
+    <input type="text" name="q" value="${filters.search||''}" aria-label="Search properties" class="flex-1 px-4 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
     <select name="category" class="px-4 py-2 border rounded-lg text-sm focus:outline-none bg-white" style="border-color:#e2e8f0;">
       <option value="">All Categories</option>
       <option value="buy" ${filters.category==='buy'?'selected':''}>For Sale</option>
@@ -10470,7 +10390,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         </div>
         <div class="col-span-full md:col-span-1">
           <label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Listing ID</label>
-          <input type="text" name="listing_id" value="${escHtml(property?.listing_id || '')}" placeholder="e.g. PC-001"
+          <input type="text" name="listing_id" value="${escHtml(property?.listing_id || '')}"
             class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-400" />
         </div>
         <div class="col-span-full md:col-span-1">
@@ -10528,40 +10448,38 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         <div><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Bathrooms</label><input type="number" name="bathrooms" value="${property?.bathrooms || 0}" min="0" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
         <div><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Toilets</label><input type="number" name="toilets" value="${property?.toilets || 0}" min="0" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
         <div><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Size (sqm)</label><input type="number" name="size_sqm" value="${property?.size_sqm || ''}" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
-        <div><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Year Built</label><input type="number" name="year_built" value="${property?.year_built || ''}" min="1900" max="2035" placeholder="e.g. 2024" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
+        <div><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Year Built</label><input type="number" name="year_built" value="${property?.year_built || ''}" min="1900" max="2035" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
         <div>
           <label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">City</label>
-          <input type="text" name="city" list="cityOptions" value="${escHtml(property?.city || '')}" placeholder="e.g. Abuja or Lagos"
+          <input type="text" name="city" list="cityOptions" value="${escHtml(property?.city || '')}"
             class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" />
           <datalist id="cityOptions">
-            <option value="Abuja"></option>
             <option value="Lagos"></option>
+            <option value="Abuja"></option>
             <option value="Port Harcourt"></option>
             <option value="Ibadan"></option>
-            <option value="Enugu"></option>
             <option value="Kano"></option>
           </datalist>
         </div>
         <div>
           <label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Area / District</label>
-          <input type="text" name="area" list="areaOptions" value="${escHtml(property?.area || '')}" placeholder="e.g. Independence Layout, Maitama, Lekki Phase 1" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" />
+          <input type="text" name="area" list="areaOptions" value="${escHtml(property?.area || '')}" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" />
           <datalist id="areaOptions">
-            <option value="Independence Layout"></option>
-            <option value="New Haven"></option>
-            <option value="GRA Enugu"></option>
-            <option value="Trans-Ekulu"></option>
-            <option value="Achara Layout"></option>
-            <option value="Maitama"></option>
-            <option value="Asokoro"></option>
-            <option value="Wuse II"></option>
-            <option value="Gwarinpa"></option>
-            <option value="Ikoyi"></option>
             <option value="Victoria Island"></option>
+            <option value="Ikoyi"></option>
             <option value="Lekki Phase 1"></option>
             <option value="Banana Island"></option>
+            <option value="Maitama"></option>
+            <option value="Asokoro"></option>
+            <option value="Wuse 2"></option>
+            <option value="Gwarinpa"></option>
+            <option value="New GRA"></option>
+            <option value="Old GRA"></option>
+            <option value="Woji"></option>
+            <option value="Peter Odili"></option>
           </datalist>
         </div>
-        <div><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Location Display</label><input type="text" name="location" value="${escHtml(property?.location || '')}" placeholder="e.g. Independence Layout, Enugu" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
+        <div><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Location Display</label><input type="text" name="location" value="${escHtml(property?.location || '')}" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
         <div class="col-span-full"><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Full Address</label><input type="text" name="address" value="${escHtml(property?.address || '')}" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
         <div class="flex items-center gap-2 col-span-full pt-1">
           <input type="checkbox" name="is_featured" id="is_featured" value="1" ${property?.is_featured ? 'checked' : ''} class="w-4 h-4 accent-amber-600" />
@@ -10609,11 +10527,13 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
 
         <details class="text-sm">
           <summary class="cursor-pointer text-slate-500 hover:text-slate-800 select-none font-medium">＋ Add image by URL instead</summary>
-          <div class="mt-2 flex gap-2">
-            <textarea id="urlPasteArea" rows="3"
-              placeholder="https://example.com/photo.jpg&#10;(one URL per line)"
-              class="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-amber-300"></textarea>
-            <button type="button" onclick="addUrlImages()" class="self-end text-xs bg-slate-800 text-white px-4 py-2 rounded-lg hover:bg-slate-900 font-semibold">Add URL</button>
+          <div class="mt-2">
+            <label for="urlPasteArea" class="block text-xs font-semibold text-slate-600 mb-1">Image URLs (one per line)</label>
+            <div class="flex gap-2">
+              <textarea id="urlPasteArea" rows="3"
+                class="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-amber-300"></textarea>
+              <button type="button" onclick="addUrlImages()" class="self-end text-xs bg-slate-800 text-white px-4 py-2 rounded-lg hover:bg-slate-900 font-semibold">Add URL</button>
+            </div>
           </div>
         </details>
 
@@ -10621,13 +10541,11 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
           <div>
             <label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Facilities / Features <span class="text-slate-400 font-normal normal-case">(one per line)</span></label>
             <textarea name="facilities_raw" rows="4"
-              placeholder="Swimming Pool&#10;Generator&#10;24/7 Security&#10;CCTV"
               class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none">${escHtml(facilities)}</textarea>
           </div>
           <div>
             <label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Amenities <span class="text-slate-400 font-normal normal-case">(one per line)</span></label>
             <textarea name="amenities_raw" rows="4"
-              placeholder="High-Speed WiFi&#10;Smart TV&#10;Air Conditioning&#10;Fitted Kitchen"
               class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none">${escHtml(amenities)}</textarea>
           </div>
         </div>
@@ -10660,11 +10578,17 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
 
         <div class="rounded-xl p-4 border border-slate-200 bg-slate-50">
           <p class="text-xs font-semibold text-slate-700 mb-2.5"><i class="fas fa-link mr-1" style="color:#C9A84C;"></i>Add Video by URL (YouTube, Vimeo, or direct .mp4)</p>
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
-            <input type="text" id="vidTitleInput" placeholder="Video title (optional)"
-              class="px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none" />
-            <input type="text" id="vidUrlInput" placeholder="https://youtu.be/xxxx or https://vimeo.com/xxxx"
-              class="px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none" />
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-2 items-end">
+            <div>
+              <label for="vidTitleInput" class="block text-xs font-medium text-slate-600 mb-1">Video Title (optional)</label>
+              <input type="text" id="vidTitleInput"
+                class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none" />
+            </div>
+            <div>
+              <label for="vidUrlInput" class="block text-xs font-medium text-slate-600 mb-1">Video URL (YouTube / Vimeo / MP4)</label>
+              <input type="text" id="vidUrlInput"
+                class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none" />
+            </div>
             <button type="button" id="addUrlBtn" onclick="addVideoUrl()"
               class="px-4 py-2 rounded-lg text-sm font-semibold text-white whitespace-nowrap"
               style="background:#0B1F3A;">
@@ -10695,7 +10619,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         <div><label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">Max Nights</label><input type="number" name="max_nights" value="${property?.max_nights || 30}" min="1" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
         <div class="col-span-full">
           <label class="block text-xs font-semibold uppercase tracking-wide text-slate-600 mb-1">House Rules <span class="text-slate-400 font-normal normal-case">(one per line)</span></label>
-          <textarea name="house_rules" rows="3" placeholder="No smoking&#10;No parties&#10;Check-in after 2pm" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm">${escHtml(houseRules)}</textarea>
+          <textarea name="house_rules" rows="3" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm">${escHtml(houseRules)}</textarea>
         </div>
       </div>
 
@@ -10745,7 +10669,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
             <label class="block text-xs font-semibold text-slate-600 mb-1">Room / Suite Name <span class="text-red-500">*</span></label>
-            <input type="text" id="rmName" placeholder="e.g. Executive King Suite" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white" />
+            <input type="text" id="rmName" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white" />
           </div>
           <div>
             <label class="block text-xs font-semibold text-slate-600 mb-1">Room Type</label>
@@ -10764,7 +10688,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
           </div>
           <div>
             <label class="block text-xs font-semibold text-slate-600 mb-1">Price Per Night (₦)</label>
-            <input type="number" id="rmPrice" min="0" placeholder="e.g. 95000" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white" />
+            <input type="number" id="rmPrice" min="0" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white" />
           </div>
           <div class="grid grid-cols-3 gap-2">
             <div><label class="block text-xs font-semibold text-slate-600 mb-1">Guests</label><input type="number" id="rmGuests" min="1" value="2" class="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-sm bg-white" /></div>
@@ -10773,11 +10697,11 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
           </div>
           <div class="col-span-full">
             <label class="block text-xs font-semibold text-slate-600 mb-1">Room Description</label>
-            <textarea id="rmDesc" rows="2" placeholder="Highlight room views, bed size, workspace, balcony..." class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white"></textarea>
+            <textarea id="rmDesc" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white"></textarea>
           </div>
           <div class="col-span-full">
             <label class="block text-xs font-semibold text-slate-600 mb-1">Room Amenities <span class="text-slate-400 font-normal">(one per line)</span></label>
-            <textarea id="rmAmenities" rows="2" placeholder="King Bed&#10;Smart TV&#10;En-suite Bath&#10;High-speed WiFi" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white"></textarea>
+            <textarea id="rmAmenities" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white"></textarea>
           </div>
           <div class="col-span-full flex items-center gap-2">
             <input type="checkbox" id="rmAvailable" checked class="w-4 h-4 accent-emerald-600" />
@@ -10806,9 +10730,12 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
           <div id="roomImgGrid" class="room-media-grid"></div>
           <details class="text-xs">
             <summary class="cursor-pointer text-slate-500 hover:text-slate-800 select-none font-medium">＋ Add room photo by URL instead</summary>
-            <div class="mt-2 flex gap-2">
-              <textarea id="rmUrlPasteArea" rows="2" placeholder="https://example.com/room.jpg&#10;(one URL per line)" class="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono bg-white focus:outline-none"></textarea>
-              <button type="button" onclick="addRoomUrlImages()" class="self-end text-xs bg-slate-800 text-white px-3 py-1.5 rounded-lg hover:bg-slate-900 font-semibold">Add URL</button>
+            <div class="mt-2">
+              <label for="rmUrlPasteArea" class="block text-xs font-semibold text-slate-600 mb-1">Room Photo URLs (one per line)</label>
+              <div class="flex gap-2">
+                <textarea id="rmUrlPasteArea" rows="2" class="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono bg-white focus:outline-none"></textarea>
+                <button type="button" onclick="addRoomUrlImages()" class="self-end text-xs bg-slate-800 text-white px-3 py-1.5 rounded-lg hover:bg-slate-900 font-semibold">Add URL</button>
+              </div>
             </div>
           </details>
         </div>
@@ -11774,17 +11701,11 @@ function adminInquiriesPage(inquiries: any[]): string {
 }
 
 function adminBookingsPage(bookings: any[]): string {
-  const addonLabels: Record<string, string> = {
-    airport_pickup: 'Airport Pickup',
-    early_late: 'Early/Late Check-out',
-    breakfast_chef: 'Breakfast Chef',
-    laundry: 'Housekeeping & Laundry'
-  }
   const content = `
   <div class="bg-white rounded-xl shadow-sm overflow-hidden">
     <div class="px-6 py-4 border-b flex items-center justify-between">
       <p class="text-sm text-gray-500">${bookings.length} total bookings</p>
-      <span class="text-xs text-slate-400">Room selection, concierge add-ons, promos &amp; arrival details shown inline</span>
+      <span class="text-xs text-slate-400">Room selection, promos &amp; arrival details shown inline</span>
     </div>
     ${bookings.length > 0 ? `
     <div class="overflow-x-auto">
@@ -11794,7 +11715,7 @@ function adminBookingsPage(bookings: any[]): string {
             <th class="px-4 py-3 text-left">Ref</th>
             <th class="px-4 py-3 text-left">Guest &amp; Arrival</th>
             <th class="px-4 py-3 text-left">Residence &amp; Room</th>
-            <th class="px-4 py-3 text-left">Stay &amp; Add-ons</th>
+            <th class="px-4 py-3 text-left">Stay Details</th>
             <th class="px-4 py-3 text-right">Pricing &amp; Payment</th>
             <th class="px-4 py-3 text-center">Status</th>
             <th class="px-4 py-3 text-center">Action</th>
@@ -11802,12 +11723,6 @@ function adminBookingsPage(bookings: any[]): string {
         </thead>
         <tbody class="divide-y">
           ${bookings.map((b: any) => {
-            let parsedAddons: any[] = []
-            try { parsedAddons = JSON.parse(b.addons || '[]') } catch { parsedAddons = [] }
-            const addonText = (Array.isArray(parsedAddons) ? parsedAddons : [])
-              .map((k: any) => typeof k === 'string' ? (addonLabels[k] || k) : (k?.label || addonLabels[k?.key] || k?.key || ''))
-              .filter(Boolean)
-              .join(', ')
             const guestBreak = (b.adults || b.children)
               ? `${b.adults || b.guests || 1} adult${(b.adults || 1) > 1 ? 's' : ''}${b.children ? `, ${b.children} child${b.children > 1 ? 'ren' : ''}` : ''}`
               : `${b.guests || 1} guest${(b.guests || 1) > 1 ? 's' : ''}`
@@ -11828,12 +11743,10 @@ function adminBookingsPage(bookings: any[]): string {
             <td class="px-4 py-3 text-gray-600 text-xs">
               <p class="font-medium text-slate-700">${escHtml(b.checkin_date || '')} → ${escHtml(b.checkout_date || '')}</p>
               <p class="text-slate-500">${b.nights || 1} night${(b.nights || 1) > 1 ? 's' : ''} · ${guestBreak}</p>
-              ${addonText ? `<p class="text-[11px] text-emerald-700 mt-1"><i class="fas fa-concierge-bell mr-1"></i>${escHtml(addonText)}</p>` : ''}
               ${b.special_requests ? `<p class="text-[11px] text-slate-400 italic mt-0.5 max-w-[200px] truncate" title="${escHtml(b.special_requests)}">"${escHtml(b.special_requests)}"</p>` : ''}
             </td>
             <td class="px-4 py-3 text-right whitespace-nowrap">
               <p class="font-semibold tabular-nums" style="color: var(--navy);">₦${(b.total_price || 0).toLocaleString()}</p>
-              ${b.addons_total ? `<p class="text-[11px] text-slate-500">+₦${Number(b.addons_total).toLocaleString()} add-ons</p>` : ''}
               ${b.discount_amount ? `<p class="text-[11px] text-emerald-600">-₦${Number(b.discount_amount).toLocaleString()} (${escHtml(b.promo_code || 'PROMO')})</p>` : ''}
               ${pmLabel ? `<p class="text-[10px] uppercase tracking-wider text-slate-400 mt-0.5">${escHtml(pmLabel)}</p>` : ''}
             </td>
@@ -11919,7 +11832,7 @@ function adminBlogFormPage(post: any): string {
       <div class="bg-white rounded-xl shadow-sm p-5 space-y-4">
         <h2 class="font-bold text-gray-800">Post Details</h2>
         <div><label class="block text-sm font-medium text-gray-700 mb-1">Title *</label><input type="text" name="title" value="${post?.title||''}" required class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" /></div>
-        <div><label class="block text-sm font-medium text-gray-700 mb-1">URL Slug (auto-generated if empty)</label><input type="text" name="slug" value="${post?.slug||''}" placeholder="e.g. buying-a-home-in-abuja" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none font-mono" style="border-color:#e2e8f0;" /></div>
+        <div><label class="block text-sm font-medium text-gray-700 mb-1">URL Slug (auto-generated if empty)</label><input type="text" name="slug" value="${post?.slug||''}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none font-mono" style="border-color:#e2e8f0;" /></div>
         <div><label class="block text-sm font-medium text-gray-700 mb-1">Excerpt / Summary</label><textarea name="excerpt" rows="2" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;">${post?.excerpt||''}</textarea></div>
         
         <!-- Cover Image with direct upload -->
@@ -11947,7 +11860,8 @@ function adminBlogFormPage(post: any): string {
               <input type="file" id="coverFileInput" name="cover_image_file" accept="image/*" class="hidden" />
             </div>
             <div class="flex-1">
-              <input type="text" name="cover_image" id="coverImageUrl" value="${post?.cover_image&&!post.cover_image.startsWith('data:') ? post.cover_image : ''}" placeholder="Or paste image URL..." class="w-full px-3 py-2.5 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
+              <label for="coverImageUrl" class="block text-xs font-medium text-gray-600 mb-1">Or Paste Image URL</label>
+              <input type="text" name="cover_image" id="coverImageUrl" value="${post?.cover_image&&!post.cover_image.startsWith('data:') ? post.cover_image : ''}" class="w-full px-3 py-2.5 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
               <p class="text-xs text-gray-400 mt-1">Enter a URL or upload a file above</p>
             </div>
           </div>
@@ -12169,24 +12083,24 @@ function adminAdsPage(ads: any[]): string {
               <p class="text-xs text-gray-500" id="bannerUploadText">Upload banner image (JPG/PNG, max 10MB)</p>
               <input type="file" name="banner_image_file" id="bannerFileInput" accept="image/*" class="hidden" onchange="previewBannerFile(this)" />
             </div>
-            <p class="text-xs text-gray-400 mb-1 text-center">— or paste image URL —</p>
-            <input type="text" name="image_url" id="editAdImage" placeholder="https://..." class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" oninput="previewBannerUrl(this.value)" />
+            <label for="editAdImage" class="block text-xs text-gray-500 mb-1 text-center">Or paste image URL</label>
+            <input type="text" name="image_url" id="editAdImage" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" oninput="previewBannerUrl(this.value)" />
           </div>
-          <div><label class="block text-xs font-medium text-gray-700 mb-1">Link URL</label><input type="text" name="link_url" id="editAdLink" placeholder="https://..." class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" /></div>
+          <div><label class="block text-xs font-medium text-gray-700 mb-1">Link URL</label><input type="text" name="link_url" id="editAdLink" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" /></div>
         </div>
 
         <!-- HTML/JS snippet fields -->
         <div id="snippetAdFields" class="hidden">
           <label class="block text-xs font-medium text-gray-700 mb-1">HTML / JavaScript Snippet</label>
           <p class="text-xs text-gray-400 mb-1">Paste your ad code, banner HTML, or JavaScript snippet here. It will be rendered directly in the page.</p>
-          <textarea name="html_snippet" id="editAdSnippet" rows="6" placeholder="&lt;script&gt;...&lt;/script&gt;&#10;or&#10;&lt;ins class=&quot;adsbygoogle&quot;..." class="w-full px-3 py-2 border rounded-lg text-xs font-mono focus:outline-none" style="border-color:#e2e8f0;"></textarea>
+          <textarea name="html_snippet" id="editAdSnippet" rows="6" class="w-full px-3 py-2 border rounded-lg text-xs font-mono focus:outline-none" style="border-color:#e2e8f0;"></textarea>
         </div>
 
         <!-- AdSense specific -->
         <div id="adsenseFields" class="hidden">
           <label class="block text-xs font-medium text-gray-700 mb-1">AdSense Ad Unit Code</label>
           <p class="text-xs text-gray-400 mb-1">Go to AdSense &rarr; Ads &rarr; By ad unit &rarr; Copy the full &lt;ins&gt;...&lt;/ins&gt; code and paste below.</p>
-          <textarea name="html_snippet" id="editAdSenseCode" rows="6" placeholder="&lt;ins class=&quot;adsbygoogle&quot;&#10;     style=&quot;display:block&quot;&#10;     data-ad-client=&quot;ca-pub-7004730585272443&quot;&#10;     data-ad-slot=&quot;XXXXXXXXXX&quot;&#10;     data-ad-format=&quot;auto&quot;&gt;&lt;/ins&gt;&#10;&lt;script&gt;(adsbygoogle = window.adsbygoogle || []).push({});&lt;/script&gt;" class="w-full px-3 py-2 border rounded-lg text-xs font-mono focus:outline-none" style="border-color:#e2e8f0;"></textarea>
+          <textarea name="html_snippet" id="editAdSenseCode" rows="6" class="w-full px-3 py-2 border rounded-lg text-xs font-mono focus:outline-none" style="border-color:#e2e8f0;"></textarea>
         </div>
 
         <div>
@@ -12599,12 +12513,12 @@ function adminGalleryPage(items: any[]): string {
           </div>
           <div>
             <label class="block text-sm font-semibold text-gray-700 mb-1">Or Image URL</label>
-            <input type="text" id="addImgUrl" placeholder="https://example.com/image.jpg" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" oninput="previewUrlInput(this,'imgPreview','imgPreviewWrap')" />
+            <input type="text" id="addImgUrl" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" oninput="previewUrlInput(this,'imgPreview','imgPreviewWrap')" />
           </div>
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="block text-sm font-semibold text-gray-700 mb-1">Title</label>
-              <input type="text" id="addImgTitle" placeholder="Image title" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
+              <input type="text" id="addImgTitle" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
             </div>
             <div>
               <label class="block text-sm font-semibold text-gray-700 mb-1">Category</label>
@@ -12615,7 +12529,7 @@ function adminGalleryPage(items: any[]): string {
           </div>
           <div>
             <label class="block text-sm font-semibold text-gray-700 mb-1">Description (optional)</label>
-            <textarea id="addImgDesc" rows="2" placeholder="Image description..." class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;"></textarea>
+            <textarea id="addImgDesc" rows="2" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;"></textarea>
           </div>
           <button onclick="submitAddMedia('image')" class="w-full btn-gold text-white py-2.5 rounded-xl font-semibold text-sm">
             <i class="fas fa-plus mr-1"></i> Add Image to Gallery
@@ -12628,14 +12542,14 @@ function adminGalleryPage(items: any[]): string {
         <div class="space-y-4">
           <div>
             <label class="block text-sm font-semibold text-gray-700 mb-1">YouTube URL</label>
-            <input type="text" id="addVidYoutube" placeholder="https://www.youtube.com/watch?v=..." class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" oninput="previewYoutube(this)" />
+            <input type="text" id="addVidYoutube" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" oninput="previewYoutube(this)" />
             <div id="ytPreviewWrap" class="hidden mt-2 rounded-xl overflow-hidden" style="height:150px;">
               <iframe id="ytPreview" class="w-full h-full" frameborder="0" allowfullscreen></iframe>
             </div>
           </div>
           <div>
             <label class="block text-sm font-semibold text-gray-700 mb-1">Or Video URL (direct link)</label>
-            <input type="text" id="addVidUrl" placeholder="https://example.com/video.mp4" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
+            <input type="text" id="addVidUrl" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
           </div>
           <div>
             <label class="block text-sm font-semibold text-gray-700 mb-1">Or Upload Video File (max 10MB)</label>
@@ -12648,7 +12562,7 @@ function adminGalleryPage(items: any[]): string {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="block text-sm font-semibold text-gray-700 mb-1">Title</label>
-              <input type="text" id="addVidTitle" placeholder="Video title" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
+              <input type="text" id="addVidTitle" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
             </div>
             <div>
               <label class="block text-sm font-semibold text-gray-700 mb-1">Category</label>
@@ -12659,7 +12573,7 @@ function adminGalleryPage(items: any[]): string {
           </div>
           <div>
             <label class="block text-sm font-semibold text-gray-700 mb-1">Description (optional)</label>
-            <textarea id="addVidDesc" rows="2" placeholder="Video description..." class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;"></textarea>
+            <textarea id="addVidDesc" rows="2" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;"></textarea>
           </div>
           <button onclick="submitAddMedia('video')" class="w-full bg-red-600 text-white py-2.5 rounded-xl font-semibold text-sm hover:bg-red-700 transition-colors">
             <i class="fas fa-plus mr-1"></i> Add Video to Gallery
@@ -12695,7 +12609,7 @@ function adminGalleryPage(items: any[]): string {
         </div>
         <div>
           <label class="block text-sm font-semibold text-gray-700 mb-1">Or Replace with URL / YouTube</label>
-          <input type="text" id="editNewUrl" placeholder="New URL or YouTube link" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
+          <input type="text" id="editNewUrl" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
         </div>
         <div>
           <label class="block text-sm font-semibold text-gray-700 mb-1">Title</label>
@@ -12982,7 +12896,8 @@ function adminSettingsPage(settings: Record<string, string>): string {
               <i class="fas fa-trash-alt"></i>
             </button>
           </div>
-          <input type="text" name="hero_bg_image" id="heroBgUrl" value="${settings.hero_bg_image?.startsWith('data:') ? '' : (settings.hero_bg_image||'')}" placeholder="Or paste image URL: https://..." class="mt-2 w-full px-3 py-2 border rounded-lg text-sm focus:outline-none font-mono" style="border-color:#e2e8f0;" oninput="previewHeroUrl(this.value)" />
+          <label for="heroBgUrl" class="block text-xs font-medium text-gray-600 mt-2 mb-1">Or Paste Image URL</label>
+          <input type="text" name="hero_bg_image" id="heroBgUrl" value="${settings.hero_bg_image?.startsWith('data:') ? '' : (settings.hero_bg_image||'')}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none font-mono" style="border-color:#e2e8f0;" oninput="previewHeroUrl(this.value)" />
           <script>
             function previewHeroFile(input) {
               const file = input.files[0]; if(!file) return;
@@ -13017,31 +12932,26 @@ function adminSettingsPage(settings: Record<string, string>): string {
       <!-- What We Do Section -->
       <div class="bg-white rounded-xl shadow-sm p-5 space-y-4">
         <h2 class="font-bold text-gray-800">Homepage — "What We Do" Section</h2>
-        <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Heading</label><input type="text" name="whatwedo_title" value="${settings.whatwedo_title||'Integrated Solutions. Endless Possibilities.'}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" placeholder="Integrated Solutions. Endless Possibilities." /></div>
-        <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Description</label><textarea name="whatwedo_body" rows="3" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" placeholder="Purecrest is a dynamic company...">${settings.whatwedo_body||''}</textarea></div>
+        <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Heading</label><input type="text" name="whatwedo_title" value="${settings.whatwedo_title||'Integrated Solutions. Endless Possibilities.'}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" /></div>
+        <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Description</label><textarea name="whatwedo_body" rows="3" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;">${settings.whatwedo_body||''}</textarea></div>
       </div>
 
       <!-- Property Management Section -->
       <div class="bg-white rounded-xl shadow-sm p-5 space-y-4">
         <h2 class="font-bold text-gray-800">Homepage — Property Management Section</h2>
-        <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Heading</label><input type="text" name="manage_section_title" value="${settings.manage_section_title||'Let Us Manage Your Property'}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" placeholder="Let Us Manage Your Property" /></div>
-        <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Body Text</label><textarea name="manage_section_body" rows="4" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" placeholder="We are an ethical brand built on transparency...">${settings.manage_section_body||''}</textarea></div>
+        <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Heading</label><input type="text" name="manage_section_title" value="${settings.manage_section_title||'Let Us Manage Your Property'}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" /></div>
+        <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Body Text</label><textarea name="manage_section_body" rows="4" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;">${settings.manage_section_body||''}</textarea></div>
       </div>
 
       <!-- Section Images -->
       <div class="bg-white rounded-xl shadow-sm p-5 space-y-5">
         <h2 class="font-bold text-gray-800">Page Images — All Sections (Admin Changeable)</h2>
-        <p class="text-xs text-gray-500 -mt-1">Upload images for homepage cards, the About section, and all service pages. Images are saved <strong>immediately</strong> when you upload — no need to click Save Settings. Recommended: JPG/PNG, min 800×500px.</p>
+        <p class="text-xs text-gray-500 -mt-1">Upload images for homepage cards, the About section, and Technology page. Images are saved <strong>immediately</strong> when you upload — no need to click Save Settings. Recommended: JPG/PNG, min 800×500px.</p>
         <div id="sectionImgSaveStatus" class="hidden text-sm font-medium rounded-lg px-3 py-2"></div>
         ${[
-          {key:'service_img_hospitality', label:'Card 1 — Purecrest Hospitality (Homepage)'},
-          {key:'service_img_property', label:'Card 2 — Purecrest Property (Homepage)'},
           {key:'service_img_solutions', label:'Card 3 — Pure Crest Technology (Homepage)'},
+          {key:'service_img_virtual_support', label:'Card 4 — Hospitality Virtual Support (Homepage)'},
           {key:'about_section_image', label:'About Section Image'},
-          {key:'hospitality_hero_image', label:'Hospitality Page — Hero Background'},
-          {key:'hospitality_partner_image', label:'Hospitality Page — Partnership Photo'},
-          {key:'property_hero_image', label:'Property Services Page — Hero Image'},
-          {key:'solutions_hero_image', label:'Solutions Page — Hero Image'},
           {key:'technology_hero_image', label:'Technology Page — Hero Background'},
         ].map(({key, label}) => `
         <div class="border rounded-xl p-4" style="border-color:#e8e8e8;">
@@ -13063,7 +12973,8 @@ function adminSettingsPage(settings: Record<string, string>): string {
             </button>
           </div>
           <div id="${key}UploadStatus" class="mt-1 text-xs font-medium hidden"></div>
-          <input type="text" name="${key}" id="${key}Url" value="${(settings[key] && !settings[key].startsWith('data:')) ? settings[key] : ''}" placeholder="Or paste image URL (https://...)..." class="mt-2 w-full px-3 py-2 border rounded-lg text-xs focus:outline-none font-mono" style="border-color:#e2e8f0;" oninput="previewSectionUrl(this.value,'${key}')" />
+          <label for="${key}Url" class="block text-xs font-medium text-gray-600 mt-2 mb-1">Or Paste Image URL</label>
+          <input type="text" name="${key}" id="${key}Url" value="${(settings[key] && !settings[key].startsWith('data:')) ? settings[key] : ''}" class="w-full px-3 py-2 border rounded-lg text-xs focus:outline-none font-mono" style="border-color:#e2e8f0;" oninput="previewSectionUrl(this.value,'${key}')" />
         </div>
         `).join('')}
         <script>
@@ -13135,7 +13046,6 @@ function adminSettingsPage(settings: Record<string, string>): string {
         <h2 class="font-bold text-gray-800">Contact Information</h2>
         <div><label class="block text-sm font-medium text-gray-700 mb-1"><i class="fab fa-whatsapp text-green-500 mr-1"></i>WhatsApp Number</label><input type="text" name="whatsapp_number" value="${settings.whatsapp_number||'+2349130403970'}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" /></div>
         <div><label class="block text-sm font-medium text-gray-700 mb-1">Contact Email</label><input type="email" name="contact_email" value="${settings.contact_email||'info@purecrest.ng'}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" /></div>
-        <div><label class="block text-sm font-medium text-gray-700 mb-1">Office Address</label><input type="text" name="office_address" value="${settings.office_address||''}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" /></div>
       </div>
 
       <!-- Social Links -->
@@ -13210,7 +13120,10 @@ function adminTechnologyPage(settings: Record<string, string>): string {
             <i class="fas fa-trash-alt"></i>
           </button>
         </div>
-        <input type="text" name="technology_hero_image" id="techHeroUrl" value="${(settings.technology_hero_image && !settings.technology_hero_image.startsWith('data:')) ? settings.technology_hero_image : ''}" placeholder="Or paste image URL (https://...)" class="w-full px-3 py-2 border rounded-xl text-xs font-mono focus:outline-none" style="border-color:#e2e8f0;" oninput="previewTechHeroUrl(this.value)" />
+        <div>
+          <label for="techHeroUrl" class="block text-xs font-medium text-gray-600 mb-1">Or Paste Image URL</label>
+          <input type="text" name="technology_hero_image" id="techHeroUrl" value="${(settings.technology_hero_image && !settings.technology_hero_image.startsWith('data:')) ? settings.technology_hero_image : ''}" class="w-full px-3 py-2 border rounded-xl text-xs font-mono focus:outline-none" style="border-color:#e2e8f0;" oninput="previewTechHeroUrl(this.value)" />
+        </div>
         <script>
           function previewTechHeroFile(input) {
             const file = input.files[0]; if(!file) return;
@@ -13264,11 +13177,11 @@ function adminTechnologyPage(settings: Record<string, string>): string {
         <h2 class="font-bold text-gray-800 flex items-center gap-2"><i class="fas fa-heading text-blue-400"></i>Page Introduction</h2>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Hero Headline Override <span class="text-xs text-gray-400">(leave blank to use default)</span></label>
-          <input type="text" name="technology_intro_title" value="${settings.technology_intro_title || ''}" placeholder="Digital Solutions That Power Modern Hospitality & Business" class="w-full px-3 py-2 border rounded-xl text-sm focus:outline-none" style="border-color:#e2e8f0;" />
+          <input type="text" name="technology_intro_title" value="${settings.technology_intro_title || ''}" class="w-full px-3 py-2 border rounded-xl text-sm focus:outline-none" style="border-color:#e2e8f0;" />
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Hero Sub-text Override <span class="text-xs text-gray-400">(leave blank to use default)</span></label>
-          <textarea name="technology_intro_body" rows="3" class="w-full px-3 py-2 border rounded-xl text-sm focus:outline-none" style="border-color:#e2e8f0;" placeholder="We build the web platforms, booking systems, and hospitality software...">${settings.technology_intro_body || ''}</textarea>
+          <textarea name="technology_intro_body" rows="3" class="w-full px-3 py-2 border rounded-xl text-sm focus:outline-none" style="border-color:#e2e8f0;">${settings.technology_intro_body || ''}</textarea>
         </div>
       </div>
 
@@ -13284,8 +13197,10 @@ function adminTechnologyPage(settings: Record<string, string>): string {
         ].map(s => `
         <div class="border rounded-xl p-4 space-y-2" style="border-color:#f0f0f0;">
           <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">${s.hint}</p>
-          <input type="text" name="${s.key}_title" value="${settings[s.key+'_title'] || ''}" placeholder="${s.defaultTitle}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
-          <textarea name="${s.key}_body" rows="2" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" placeholder="Section description...">${settings[s.key+'_body'] || ''}</textarea>
+          <label class="block text-xs font-medium text-gray-600">Section Title</label>
+          <input type="text" name="${s.key}_title" value="${settings[s.key+'_title'] || ''}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;" />
+          <label class="block text-xs font-medium text-gray-600">Section Description</label>
+          <textarea name="${s.key}_body" rows="2" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none" style="border-color:#e2e8f0;">${settings[s.key+'_body'] || ''}</textarea>
         </div>
         `).join('')}
       </div>
@@ -13324,15 +13239,15 @@ function adminUsersPage(admins: any[]): string {
         <input type="hidden" name="id" id="editUserId" value="" />
         <div>
           <label class="block text-xs font-medium text-gray-700 mb-1">Username *</label>
-          <input type="text" name="username" id="editUsername" required placeholder="e.g. john_admin" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:border-teal-400" style="border-color:#e2e8f0;" />
+          <input type="text" name="username" id="editUsername" required class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:border-teal-400" style="border-color:#e2e8f0;" />
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-700 mb-1">Email</label>
-          <input type="email" name="email" id="editEmail" placeholder="admin@purecrest.ng" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:border-teal-400" style="border-color:#e2e8f0;" />
+          <input type="email" name="email" id="editEmail" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:border-teal-400" style="border-color:#e2e8f0;" />
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-700 mb-1">Password <span id="pwdNote" class="text-gray-400 font-normal">(leave blank to keep current)</span></label>
-          <input type="password" name="password" id="editPassword" placeholder="••••••••" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:border-teal-400" style="border-color:#e2e8f0;" autocomplete="new-password" />
+          <input type="password" name="password" id="editPassword" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:border-teal-400" style="border-color:#e2e8f0;" autocomplete="new-password" />
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-700 mb-1">Role</label>
