@@ -1,14 +1,8 @@
+
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "purecrest",
   "compatibility_date": "2026-04-26",
   "pages_build_output_dir": "./dist",
-  "compatibility_flags": ["nodejs_compat"],
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "purecrest-production",
-      "database_id": "e939838a-ee56-4963-af97-c43f13fb9cf7"
-    }
-  ]
+  "compatibility_flags": ["nodejs_compat"]
 }
