@@ -228,14 +228,14 @@ function initializeSchemaAndSeed(sqlite: DatabaseSync): void {
       const richgateProp = sqlite
         .prepare(`SELECT id FROM properties WHERE listing_id IN ('richgate-apartments-enugu', 'PC-ENUGU-01') LIMIT 1`)
         .get() as { id: number } | undefined
-      const assetsDir = path.resolve(process.cwd(), 'src/assets/images')
+      const assetsDir = path.resolve(process.cwd(), 'public/assets/images')
       if (fs.existsSync(assetsDir)) {
         const imgFiles = fs.readdirSync(assetsDir).filter((f) => /\.(jpe?g|png|webp)$/i.test(f))
         const insertStmt = sqlite.prepare(
           `INSERT INTO media_uploads (uploader_type, property_id, file_name, file_type, mime_type, file_url, image_blob, file_size) VALUES ('admin', ?, ?, 'image', ?, ?, ?, ?)`
         )
         for (const imgFile of imgFiles) {
-          const publicUrl = `/src/assets/images/${imgFile}`
+          const publicUrl = `/assets/images/${imgFile}`
           const exists = sqlite
             .prepare(`SELECT id FROM media_uploads WHERE file_url = ?`)
             .get(publicUrl)

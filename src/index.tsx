@@ -672,6 +672,85 @@ app.post('/admin/properties/:id/delete', async (c) => {
 })
 
 // ============================================================
+// MEDIA HELPERS — D1-safe BLOB streaming & <=920KB upload storage
+// ============================================================
+function firstStr(v: any): string {
+  return String(Array.isArray(v) ? (v[0] ?? '') : (v ?? ''))
+}
+
+function normalizeBlobBytes(blob: any): Uint8Array | null {
+  if (!blob) return null
+  if (blob instanceof Uint8Array) return blob
+  if (blob instanceof ArrayBuffer) return new Uint8Array(blob)
+  if (ArrayBuffer.isView(blob)) return new Uint8Array(blob.buffer, blob.byteOffset, blob.byteLength)
+  if (Array.isArray(blob)) return new Uint8Array(blob)
+  return null
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 8192
+  let binary = ''
+  for (let i = 0; i < bytes.byteLength; i += chunkSize) {
+    const end = Math.min(i + chunkSize, bytes.byteLength)
+    for (let j = i; j < end; j++) {
+      binary += String.fromCharCode(bytes[j])
+    }
+  }
+  return btoa(binary)
+}
+
+async function saveImageToMediaUploads(
+  db: D1Database,
+  file: any,
+  opts?: { propertyId?: number | null; roomId?: number | null; uploaderType?: string; fallbackName?: string }
+): Promise<{ ok: true; mediaId: number; url: string; size: number } | { ok: false; error: string }> {
+  if (!file || typeof file === 'string' || !file.size) {
+    return { ok: false, error: 'No image file received.' }
+  }
+  const mime = String(file.type || 'image/jpeg')
+  if (!mime.startsWith('image/')) {
+    return { ok: false, error: 'Invalid file type. Please upload an image file (JPG, PNG, WebP, GIF).' }
+  }
+  const buffer = await file.arrayBuffer()
+  const bytes = new Uint8Array(buffer)
+  if (bytes.byteLength > 920 * 1024) {
+    return { ok: false, error: 'Image exceeds 920 KB after optimization. Please compress or choose a smaller image.' }
+  }
+  const uploaderType = opts?.uploaderType || 'admin'
+  const propertyIdNum = opts?.propertyId ?? null
+  const roomIdNum = opts?.roomId ?? null
+  const fileName = String(file.name || opts?.fallbackName || 'image-upload')
+
+  try {
+    const mr = await db.prepare(
+      `INSERT INTO media_uploads (uploader_type, property_id, room_id, file_name, file_type, mime_type, file_url, image_blob, file_size) VALUES (?,?,?,?,?,?,?,?,?)`
+    ).bind(uploaderType, propertyIdNum, roomIdNum, fileName, 'image', mime, '', bytes, bytes.byteLength).run()
+    const mediaId = Number(mr.meta.last_row_id || 0)
+    if (!mediaId) return { ok: false, error: 'Failed to store image record.' }
+    const mediaUrl = `/api/media/${mediaId}`
+    try {
+      await db.prepare(`UPDATE media_uploads SET file_url = ? WHERE id = ?`).bind(mediaUrl, mediaId).run()
+    } catch (_) {}
+    return { ok: true, mediaId, url: mediaUrl, size: bytes.byteLength }
+  } catch (e: any) {
+    if (bytes.byteLength <= 650 * 1024) {
+      try {
+        const dataUrl = `data:${mime};base64,${bytesToBase64(bytes)}`
+        const mr = await db.prepare(
+          `INSERT INTO media_uploads (uploader_type, property_id, file_name, file_type, mime_type, file_url, file_size) VALUES (?,?,?,?,?,?,?)`
+        ).bind(uploaderType, propertyIdNum, fileName, 'image', mime, dataUrl, bytes.byteLength).run()
+        const mediaId = Number(mr.meta.last_row_id || 0)
+        const mediaUrl = mediaId ? `/api/media/${mediaId}` : dataUrl
+        return { ok: true, mediaId, url: mediaUrl, size: bytes.byteLength }
+      } catch (fe: any) {
+        return { ok: false, error: 'Database upload failed: ' + (fe?.message || String(fe)) }
+      }
+    }
+    return { ok: false, error: 'Image upload failed: ' + (e?.message || String(e)) }
+  }
+}
+
+// ============================================================
 // MEDIA STREAMING — serves uploaded images/videos by lightweight /api/media/:id URL
 // ============================================================
 app.get('/api/media/:id', async (c) => {
@@ -686,20 +765,16 @@ app.get('/api/media/:id', async (c) => {
     }
     if (!row) return c.text('Media not found', 404)
 
-    // Serve directly from binary BLOB column in SQLite when available
-    if (row.image_blob && (row.image_blob instanceof Uint8Array || ArrayBuffer.isView(row.image_blob) || row.image_blob instanceof ArrayBuffer)) {
-      const bytes = row.image_blob instanceof Uint8Array
-        ? row.image_blob
-        : new Uint8Array(row.image_blob instanceof ArrayBuffer ? row.image_blob : row.image_blob.buffer)
-      if (bytes.byteLength > 0) {
-        return new Response(bytes as unknown as BodyInit, {
-          status: 200,
-          headers: {
-            'Content-Type': row.mime_type || 'application/octet-stream',
-            'Cache-Control': 'public, max-age=31536000, immutable',
-          },
-        })
-      }
+    // Serve directly from binary BLOB column in SQLite/D1 when available
+    const blobBytes = normalizeBlobBytes(row.image_blob)
+    if (blobBytes && blobBytes.byteLength > 0) {
+      return new Response(blobBytes as unknown as BodyInit, {
+        status: 200,
+        headers: {
+          'Content-Type': row.mime_type || 'application/octet-stream',
+          'Cache-Control': 'public, max-age=31536000, immutable',
+        },
+      })
     }
 
     if (!row.file_url) return c.text('Media not found', 404)
@@ -738,48 +813,30 @@ app.post('/api/upload-image', async (c) => {
   try {
     let body: any
     try { body = await c.req.parseBody() } catch(pe) { return c.json({ success: false, error: 'Could not parse request body' }) }
-    const file = body['image'] as File | null
-    const propertyIdRaw = (body['property_id'] as string || '').trim()
-    const roomIdRaw = (body['room_id'] as string || '').trim()
+    const file = Array.isArray(body['image']) ? body['image'][0] : body['image'] as File | null
+    const propertyIdRaw = firstStr(body['property_id']).trim()
+    const roomIdRaw = firstStr(body['room_id']).trim()
     const propertyIdNum = propertyIdRaw && !isNaN(parseInt(propertyIdRaw)) ? parseInt(propertyIdRaw) : null
     const roomIdNum = roomIdRaw && !isNaN(parseInt(roomIdRaw)) ? parseInt(roomIdRaw) : null
-    const replaceIndexRaw = (body['replace_index'] as string || '').trim()
+    const replaceIndexRaw = firstStr(body['replace_index']).trim()
     const replaceIndex = replaceIndexRaw !== '' && !isNaN(parseInt(replaceIndexRaw)) ? parseInt(replaceIndexRaw) : -1
     if (!file || typeof file === 'string' || !file.size) {
-      return c.json({ success: false, error: 'No image file received. Make sure you are posting a multipart/form-data request with field name "image".' })
+      return c.json({ success: false, error: 'No image file received. Make sure you are posting a multipart/form-data request with field name "image".' }, 400)
     }
-    if (!file.type.startsWith('image/')) {
-      return c.json({ success: false, error: 'Invalid file type. Please upload an image file (JPG, PNG, WebP, GIF).' })
+    if (!file.type || !file.type.startsWith('image/')) {
+      return c.json({ success: false, error: 'Invalid file type. Please upload an image file (JPG, PNG, WebP, GIF).' }, 400)
     }
-    const maxSize = 10 * 1024 * 1024 // 10 MB
-    if (file.size > maxSize) {
-      return c.json({ success: false, error: `Image is too large (${(file.size/1024/1024).toFixed(1)} MB). Maximum allowed size is 10 MB.` })
+    const saved = await saveImageToMediaUploads(db, file, {
+      propertyId: propertyIdNum,
+      roomId: roomIdNum,
+      uploaderType: 'admin',
+      fallbackName: 'image-upload',
+    })
+    if (!saved.ok) {
+      return c.json({ success: false, error: saved.error }, 400)
     }
-    const buffer = await file.arrayBuffer()
-    const bytes = new Uint8Array(buffer)
-    const chunkSize = 8192
-    let binary = ''
-    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-      binary += String.fromCharCode(...Array.from(bytes.slice(i, i + chunkSize)))
-    }
-    const dataUrl = `data:${file.type};base64,${btoa(binary)}`
-    let mediaId: number | null = null
-    try {
-      const mr = await db.prepare(
-        `INSERT INTO media_uploads (uploader_type, property_id, room_id, file_name, file_type, mime_type, file_url, image_blob, file_size) VALUES ('admin',?,?,?,?,?,?,?,?)`
-      ).bind(propertyIdNum, roomIdNum, file.name || 'image-upload', 'image', file.type, dataUrl, bytes, file.size).run()
-      mediaId = (mr.meta.last_row_id ?? null) as number | null
-    } catch {
-      try {
-        const mr = await db.prepare(
-          `INSERT INTO media_uploads (uploader_type, property_id, file_name, file_type, mime_type, file_url, file_size) VALUES ('admin',?,?,?,?,?,?)`
-        ).bind(propertyIdNum, file.name || 'image-upload', 'image', file.type, dataUrl, file.size).run()
-        mediaId = (mr.meta.last_row_id ?? null) as number | null
-      } catch (me: any) {
-        console.error('media_uploads insert error:', me?.message || me)
-      }
-    }
-    const mediaUrl = mediaId ? `/api/media/${mediaId}` : dataUrl
+    const mediaId = saved.mediaId
+    const mediaUrl = saved.url
     let updatedImages: string[] | undefined = undefined
 
     if (roomIdNum) {
@@ -839,7 +896,7 @@ app.post('/api/properties/:id/images/sync', async (c) => {
   try {
     const body = await c.req.json()
     const raw = Array.isArray(body.images) ? body.images : []
-    const images = raw.map((u: any) => String(u || '').trim()).filter(Boolean)
+    const images = raw.map((u: any) => String(u || '').trim()).filter((u: string) => Boolean(u) && !u.startsWith('blob:'))
     await db.prepare(`UPDATE properties SET images = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
       .bind(JSON.stringify(images), id).run()
     return c.json({ success: true, images })
@@ -857,7 +914,7 @@ app.post('/api/rooms/:id/images/sync', async (c) => {
   try {
     const body = await c.req.json()
     const raw = Array.isArray(body.images) ? body.images : []
-    const images = raw.map((u: any) => String(u || '').trim()).filter(Boolean)
+    const images = raw.map((u: any) => String(u || '').trim()).filter((u: string) => Boolean(u) && !u.startsWith('blob:'))
     const room = await db.prepare(`SELECT property_id FROM property_rooms WHERE id = ?`).bind(roomId).first() as any
     await db.prepare(`UPDATE property_rooms SET images = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
       .bind(JSON.stringify(images), roomId).run()
@@ -1071,29 +1128,34 @@ app.post('/api/upload-video', async (c) => {
     if (!file.type.startsWith('video/')) {
       return c.json({ success: false, error: 'Invalid file type. Please upload a video file (MP4, MOV, WebM).' })
     }
-    const maxSize = 10 * 1024 * 1024 // 10 MB
+    const maxSize = 900 * 1024 // 900 KB D1 upload ceiling
     if (file.size > maxSize) {
       return c.json({
         success: false,
-        error: `Video file (${(file.size/1024/1024).toFixed(1)} MB) is too large. Max 10 MB for direct upload. For larger videos, upload to YouTube or Vimeo and paste the URL instead.`
-      })
+        error: `Video file (${(file.size/1024).toFixed(0)} KB) exceeds 900 KB database upload limit. Paste a YouTube or Vimeo link instead.`
+      }, 400)
     }
     const buffer = await file.arrayBuffer()
     const bytes = new Uint8Array(buffer)
-    const chunkSize = 8192
-    let binary = ''
-    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-      binary += String.fromCharCode(...Array.from(bytes.slice(i, i + chunkSize)))
-    }
-    const dataUrl = `data:${file.type};base64,${btoa(binary)}`
     let mediaId: number | null = null
     try {
       const mr = await db.prepare(
-        `INSERT INTO media_uploads (uploader_type, file_name, file_type, mime_type, file_url, file_size) VALUES ('admin',?,?,?,?,?)`
-      ).bind(file.name || 'video-upload', 'video', file.type, dataUrl, file.size).run()
+        `INSERT INTO media_uploads (uploader_type, file_name, file_type, mime_type, file_url, image_blob, file_size) VALUES ('admin',?,?,?,?,?,?)`
+      ).bind(file.name || 'video-upload', 'video', file.type, '', bytes, bytes.byteLength).run()
       mediaId = (mr.meta.last_row_id ?? null) as number | null
-    } catch(_) {}
-    const storedUrl = mediaId ? `/api/media/${mediaId}` : dataUrl
+      if (mediaId) {
+        await db.prepare(`UPDATE media_uploads SET file_url = ? WHERE id = ?`).bind(`/api/media/${mediaId}`, mediaId).run()
+      }
+    } catch {
+      try {
+        const dataUrl = `data:${file.type};base64,${bytesToBase64(bytes)}`
+        const mr = await db.prepare(
+          `INSERT INTO media_uploads (uploader_type, file_name, file_type, mime_type, file_url, file_size) VALUES ('admin',?,?,?,?,?)`
+        ).bind(file.name || 'video-upload', 'video', file.type, dataUrl, bytes.byteLength).run()
+        mediaId = (mr.meta.last_row_id ?? null) as number | null
+      } catch(_) {}
+    }
+    const storedUrl = mediaId ? `/api/media/${mediaId}` : `data:${file.type};base64,${bytesToBase64(bytes)}`
     const result = await db.prepare(
       `INSERT INTO property_videos (property_id, property_listing_id, video_url, title, file_size, mime_type) VALUES (?,?,?,?,?,?)`
     ).bind(pid, listingId || '', storedUrl, title, file.size, file.type).run()
@@ -1144,50 +1206,87 @@ app.post('/api/properties/:id/images/delete', async (c) => {
 })
 
 app.post('/admin/properties/save', async (c) => {
+  if (!hasAdminCookie(c)) return c.redirect('/admin/login')
   const db = c.env.DB
   const body = await c.req.parseBody({ all: true })
 
-  const facilities = (body.facilities_raw as string || '').split('\n').map((s: string) => s.trim()).filter(Boolean)
-  const amenities = (body.amenities_raw as string || '').split('\n').map((s: string) => s.trim()).filter(Boolean)
-  const houseRulesArr = (body.house_rules as string || '').split('\n').map((s: string) => s.trim()).filter(Boolean)
+  const str = (v: any) => firstStr(v)
+  const num = (v: any, def: number = 0) => { const n = parseFloat(firstStr(v)); return isNaN(n) ? def : n }
+  const int = (v: any, def: number | null = 0) => { const n = parseInt(firstStr(v)); return isNaN(n) ? def : n }
 
-  let imagesRawStr = (body.images_raw as string || '')
-  let images: string[] = []
-  if (imagesRawStr.trim().startsWith('[')) {
-    try { images = JSON.parse(imagesRawStr).filter(Boolean) } catch { images = [] }
-  } else {
-    images = imagesRawStr.split('\n').map((s: string) => s.trim()).filter(Boolean)
+  const titleVal = str(body.title).trim()
+  if (!titleVal) {
+    return c.html(`<html><body style="font-family:sans-serif;padding:40px;max-width:500px;margin:auto">
+      <h2 style="color:#dc2626">Missing Property Title</h2>
+      <p>Please provide a property title before saving.</p>
+      <a href="/admin/properties" style="color:#C9A84C">&larr; Back to Properties</a>
+    </body></html>`, 400)
   }
 
-  const listingId = (body.listing_id as string) || `PC-${Date.now()}`
-  const id = body.id as string
+  const facilities = str(body.facilities_raw).split('\n').map((s: string) => s.trim()).filter(Boolean)
+  const amenities = str(body.amenities_raw).split('\n').map((s: string) => s.trim()).filter(Boolean)
+  const houseRulesArr = str(body.house_rules).split('\n').map((s: string) => s.trim()).filter(Boolean)
 
-  const str = (v: any) => (v !== undefined && v !== null) ? String(v) : ''
-  const num = (v: any, def: number = 0) => { const n = parseFloat(String(v || '')); return isNaN(n) ? def : n }
-  const int = (v: any, def: number | null = 0) => { const n = parseInt(String(v || '')); return isNaN(n) ? def : n }
+  const imagesRawStr = str(body.images_raw)
+  let images: string[] = []
+  if (imagesRawStr.trim().startsWith('[')) {
+    try {
+      images = JSON.parse(imagesRawStr).map((s: any) => String(s || '').trim()).filter((u: string) => Boolean(u) && !u.startsWith('blob:'))
+    } catch { images = [] }
+  } else {
+    images = imagesRawStr.split('\n').map((s: string) => s.trim()).filter((u: string) => Boolean(u) && !u.startsWith('blob:'))
+  }
+
+  const id = str(body.id).trim()
+  let listingId = str(body.listing_id).trim() || `PC-${Date.now()}-${Math.floor(Math.random() * 900 + 100)}`
+
+  try {
+    const existingListing = await db.prepare(`SELECT id FROM properties WHERE listing_id = ?`).bind(listingId).first() as any
+    if (existingListing) {
+      if (id && String(existingListing.id) !== String(id)) {
+        return c.html(`<html><body style="font-family:sans-serif;padding:40px;max-width:500px;margin:auto">
+          <h2 style="color:#dc2626">Duplicate Listing ID</h2>
+          <p>Another property already uses Listing ID "${escHtml(listingId)}". Please use a different Listing ID or leave it blank to auto-generate one.</p>
+          <a href="/admin/properties/${escHtml(id)}/edit" style="color:#C9A84C">&larr; Back to Edit Property</a>
+        </body></html>`, 400)
+      }
+      if (!id) {
+        listingId = `${listingId}-${Math.floor(Math.random() * 900 + 100)}`
+      }
+    }
+  } catch (_) {}
 
   const areaVal = str(body.area).trim()
+  const locationRaw = str(body.location).trim()
   const lagosAreas = new Set(['Victoria Island','Lekki','Ikoyi','Ajah','Yaba','Surulere','Ikeja','Lagos Island','Apapa','Maryland','Gbagada','Magodo','Lekki Phase 1','Sangotedo','Banana Island','Eko Atlantic'])
   const abujaAreas = new Set(['Maitama','Wuse 2','Asokoro','Jabi','Garki','Utako','Guzape','Kubwa','Kado','Apo','Gwarinpa','Katampe','Lugbe','Kuje','Wuse','Central Business District','Durumi','Gudu','Lokogoma'])
   const enuguAreas = new Set(['Thinkers Corner','Independence Layout','New Haven','GRA Enugu','Trans-Ekulu','Achara Layout','Uwani','Coal Camp','Ogui','Enugu'])
+  const portHarcourtAreas = new Set(['New GRA','Old GRA','Woji','Peter Odili','Trans Amadi','Ada George','Rumuola','GRA Phase 1','GRA Phase 2','GRA Phase 3','Port Harcourt'])
   let cityVal = str(body.city).trim()
   if (!cityVal) {
-    if (lagosAreas.has(areaVal)) cityVal = 'Lagos'
-    else if (enuguAreas.has(areaVal) || str(body.location).toLowerCase().includes('enugu')) cityVal = 'Enugu'
-    else if (abujaAreas.has(areaVal)) cityVal = 'Abuja'
+    if (lagosAreas.has(areaVal) || locationRaw.toLowerCase().includes('lagos')) cityVal = 'Lagos'
+    else if (portHarcourtAreas.has(areaVal) || locationRaw.toLowerCase().includes('port harcourt')) cityVal = 'Port Harcourt'
+    else if (enuguAreas.has(areaVal) || locationRaw.toLowerCase().includes('enugu')) cityVal = 'Enugu'
+    else if (abujaAreas.has(areaVal) || locationRaw.toLowerCase().includes('abuja')) cityVal = 'Abuja'
     else cityVal = 'Abuja'
   }
+  const effectiveLocation = locationRaw || (areaVal ? `${areaVal}, ${cityVal}` : cityVal)
+  const isFeaturedVal = str(body.is_featured) ? 1 : 0
+  const statusVal = str(body.status).trim() || 'active'
+  const categoryVal = str(body.category).trim() || 'buy'
+  const propertyTypeVal = str(body.property_type).trim() || 'Apartment'
+  const pricePeriodVal = str(body.price_period).trim() || (categoryVal === 'short-let' ? 'night' : 'outright')
 
   try {
     if (id) {
       await db.prepare(`UPDATE properties SET listing_id=?,title=?,description=?,property_type=?,category=?,price=?,price_period=?,bedrooms=?,bathrooms=?,toilets=?,size_sqm=?,year_built=?,location=?,address=?,area=?,city=?,is_featured=?,status=?,facilities=?,images=?,amenities=?,price_per_night=?,min_nights=?,max_nights=?,house_rules=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-        .bind(listingId, str(body.title), str(body.description), str(body.property_type), str(body.category), num(body.price), str(body.price_period), int(body.bedrooms), int(body.bathrooms), int(body.toilets), num(body.size_sqm), int(body.year_built, null), str(body.location), str(body.address), areaVal, cityVal, body.is_featured?1:0, str(body.status)||'active', JSON.stringify(facilities), JSON.stringify(images), JSON.stringify(amenities), num(body.price_per_night), int(body.min_nights)||1, int(body.max_nights)||30, JSON.stringify(houseRulesArr), id).run()
+        .bind(listingId, titleVal, str(body.description), propertyTypeVal, categoryVal, num(body.price), pricePeriodVal, int(body.bedrooms), int(body.bathrooms), int(body.toilets), num(body.size_sqm), int(body.year_built, null), effectiveLocation, str(body.address), areaVal, cityVal, isFeaturedVal, statusVal, JSON.stringify(facilities), JSON.stringify(images), JSON.stringify(amenities), num(body.price_per_night), int(body.min_nights, 1) || 1, int(body.max_nights, 30) || 30, JSON.stringify(houseRulesArr), id).run()
       return c.redirect(`/admin/properties/${id}/edit?saved=1`)
     } else {
       const result = await db.prepare(`INSERT INTO properties (listing_id,title,description,property_type,category,price,price_period,bedrooms,bathrooms,toilets,size_sqm,year_built,location,address,area,city,is_featured,status,facilities,images,amenities,price_per_night,min_nights,max_nights,house_rules) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .bind(listingId, str(body.title), str(body.description), str(body.property_type), str(body.category), num(body.price), str(body.price_period), int(body.bedrooms), int(body.bathrooms), int(body.toilets), num(body.size_sqm), int(body.year_built, null), str(body.location), str(body.address), areaVal, cityVal, body.is_featured?1:0, str(body.status)||'active', JSON.stringify(facilities), JSON.stringify(images), JSON.stringify(amenities), num(body.price_per_night), int(body.min_nights)||1, int(body.max_nights)||30, JSON.stringify(houseRulesArr)).run()
+        .bind(listingId, titleVal, str(body.description), propertyTypeVal, categoryVal, num(body.price), pricePeriodVal, int(body.bedrooms), int(body.bathrooms), int(body.toilets), num(body.size_sqm), int(body.year_built, null), effectiveLocation, str(body.address), areaVal, cityVal, isFeaturedVal, statusVal, JSON.stringify(facilities), JSON.stringify(images), JSON.stringify(amenities), num(body.price_per_night), int(body.min_nights, 1) || 1, int(body.max_nights, 30) || 30, JSON.stringify(houseRulesArr)).run()
       const newId = result.meta.last_row_id
-      const pendingVideoIds = (body.pending_video_ids as string || '').split(',').map(s => s.trim()).filter(Boolean)
+      const pendingVideoIds = str(body.pending_video_ids).split(',').map(s => s.trim()).filter(Boolean)
       for (const vid of pendingVideoIds) {
         try {
           await db.prepare(`UPDATE property_videos SET property_id=?, property_listing_id=? WHERE id=?`).bind(newId, listingId, parseInt(vid)).run()
@@ -1198,7 +1297,7 @@ app.post('/admin/properties/save', async (c) => {
       } catch(_) {}
 
       // Save any queued room types created before initial property save
-      const pendingRoomsRaw = (body.pending_rooms_json as string || '').trim()
+      const pendingRoomsRaw = str(body.pending_rooms_json).trim()
       if (pendingRoomsRaw) {
         try {
           const pendingRooms = JSON.parse(pendingRoomsRaw)
@@ -1207,7 +1306,7 @@ app.post('/admin/properties/save', async (c) => {
               const rm = pendingRooms[idx]
               const rmName = String(rm?.room_name || '').trim()
               if (!rmName) continue
-              const rmImgs = Array.isArray(rm.images) ? rm.images.map((u: any) => String(u).trim()).filter(Boolean) : []
+              const rmImgs = Array.isArray(rm.images) ? rm.images.map((u: any) => String(u || '').trim()).filter((u: string) => Boolean(u) && !u.startsWith('blob:')) : []
               const rmAmens = Array.isArray(rm.amenities) ? rm.amenities.map((u: any) => String(u).trim()).filter(Boolean) : []
               const rmRes = await db.prepare(
                 `INSERT INTO property_rooms (property_id, room_name, room_type, description, price_per_night, max_guests, bedrooms, bathrooms, amenities, images, is_available, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
@@ -1229,11 +1328,15 @@ app.post('/admin/properties/save', async (c) => {
               for (let j = 0; j < rmImgs.length; j++) {
                 const mMatch = rmImgs[j].match(/^\/api\/media\/(\d+)$/)
                 const mediaId = mMatch ? parseInt(mMatch[1]) : null
-                await db.prepare(
-                  `INSERT INTO property_room_images (property_id, room_id, media_id, image_url, is_cover, sort_order) VALUES (?,?,?,?,?,?)`
-                ).bind(newId, rmId, mediaId, rmImgs[j], j === 0 ? 1 : 0, j).run()
+                try {
+                  await db.prepare(
+                    `INSERT INTO property_room_images (property_id, room_id, media_id, image_url, is_cover, sort_order) VALUES (?,?,?,?,?,?)`
+                  ).bind(newId, rmId, mediaId, rmImgs[j], j === 0 ? 1 : 0, j).run()
+                } catch (_) {}
                 if (mediaId) {
-                  await db.prepare(`UPDATE media_uploads SET property_id = ?, room_id = ? WHERE id = ?`).bind(newId, rmId, mediaId).run()
+                  try {
+                    await db.prepare(`UPDATE media_uploads SET property_id = ?, room_id = ? WHERE id = ?`).bind(newId, rmId, mediaId).run()
+                  } catch (_) {}
                 }
               }
             }
@@ -1362,20 +1465,9 @@ app.post('/admin/blog/save', async (c) => {
 
   // Handle uploaded cover image file
   const coverFile = body['cover_image_file'] as File
-  if (coverFile && coverFile.size && coverFile.size <= 10 * 1024 * 1024) {
-    const buffer = await coverFile.arrayBuffer()
-    const bytes = new Uint8Array(buffer)
-    const chunkSize = 8192
-    let binary = ''
-    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-      binary += String.fromCharCode(...bytes.slice(i, i + chunkSize))
-    }
-    const b64 = btoa(binary)
-    coverImage = `data:${coverFile.type};base64,${b64}`
-    try {
-      await db.prepare(`INSERT INTO media_uploads (uploader_type, file_name, file_type, mime_type, file_url, file_size) VALUES ('admin',?,?,?,?,?)`)
-        .bind(coverFile.name || 'cover', 'image', coverFile.type, coverImage, coverFile.size).run()
-    } catch(_) {}
+  if (coverFile && typeof coverFile !== 'string' && coverFile.size > 0) {
+    const saved = await saveImageToMediaUploads(db, coverFile, { fallbackName: 'blog-cover' })
+    if (saved.ok) coverImage = saved.url
   }
 
   try {
@@ -1469,6 +1561,7 @@ app.get('/admin/gallery', async (c) => {
 
 // API: Add gallery item
 app.post('/api/gallery/add', async (c) => {
+  if (!hasAdminCookie(c)) return c.json({ success: false, error: 'Unauthorized' }, 401)
   const db = c.env.DB
   try {
     await db.prepare(`CREATE TABLE IF NOT EXISTS gallery (
@@ -1516,50 +1609,36 @@ app.post('/api/gallery/add', async (c) => {
       }
       // Check for uploaded video file
       const videoFile = body['video_file'] as File
-      if (videoFile && videoFile.size) {
-        if (videoFile.size > 10 * 1024 * 1024) {
-          return c.json({ success: false, error: 'Video file too large. Max 10MB.' })
+      if (videoFile && typeof videoFile !== 'string' && videoFile.size) {
+        if (videoFile.size > 900 * 1024) {
+          return c.json({ success: false, error: 'Video exceeds 900 KB database upload limit. Paste a YouTube URL instead.' }, 400)
         }
         const buffer = await videoFile.arrayBuffer()
         const bytes = new Uint8Array(buffer)
-        const chunkSize = 8192
-        let binary = ''
-        for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-          binary += String.fromCharCode(...bytes.slice(i, i + chunkSize))
-        }
-        fileUrl = `data:${videoFile.type};base64,${btoa(binary)}`
         sourceType = 'upload'
         mimeType = videoFile.type
-        fileSize = videoFile.size
-        // Save video upload to media_uploads table
+        fileSize = bytes.byteLength
+        let mediaId: number | null = null
         try {
-          await db.prepare(`INSERT INTO media_uploads (uploader_type, file_name, file_type, mime_type, file_url, file_size) VALUES ('admin',?,?,?,?,?)`)
-            .bind(videoFile.name || 'gallery-video', 'video', videoFile.type, fileUrl, videoFile.size).run()
+          const mr = await db.prepare(`INSERT INTO media_uploads (uploader_type, file_name, file_type, mime_type, file_url, image_blob, file_size) VALUES ('admin',?,?,?,?,?,?)`)
+            .bind(videoFile.name || 'gallery-video', 'video', videoFile.type, '', bytes, bytes.byteLength).run()
+          mediaId = Number(mr.meta.last_row_id || 0) || null
+          if (mediaId) {
+            await db.prepare(`UPDATE media_uploads SET file_url = ? WHERE id = ?`).bind(`/api/media/${mediaId}`, mediaId).run()
+          }
         } catch(_) {}
+        fileUrl = mediaId ? `/api/media/${mediaId}` : `data:${videoFile.type};base64,${bytesToBase64(bytes)}`
       }
     } else {
       // Image
       const imageFile = body['image_file'] as File
-      if (imageFile && imageFile.size) {
-        if (imageFile.size > 10 * 1024 * 1024) {
-          return c.json({ success: false, error: 'Image too large. Max 10MB.' })
-        }
-        const buffer = await imageFile.arrayBuffer()
-        const bytes = new Uint8Array(buffer)
-        const chunkSize = 8192
-        let binary = ''
-        for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-          binary += String.fromCharCode(...bytes.slice(i, i + chunkSize))
-        }
-        fileUrl = `data:${imageFile.type};base64,${btoa(binary)}`
+      if (imageFile && typeof imageFile !== 'string' && imageFile.size) {
+        const saved = await saveImageToMediaUploads(db, imageFile, { fallbackName: 'gallery' })
+        if (!saved.ok) return c.json({ success: false, error: saved.error }, 400)
+        fileUrl = saved.url
         sourceType = 'upload'
         mimeType = imageFile.type
-        fileSize = imageFile.size
-        // Also save to media_uploads
-        try {
-          await db.prepare(`INSERT INTO media_uploads (uploader_type, file_name, file_type, mime_type, file_url, file_size) VALUES ('admin',?,?,?,?,?)`)
-            .bind(imageFile.name || 'gallery', 'image', imageFile.type, fileUrl, imageFile.size).run()
-        } catch(_) {}
+        fileSize = saved.size
       } else if (urlInput) {
         fileUrl = urlInput
         sourceType = 'url'
@@ -1578,6 +1657,7 @@ app.post('/api/gallery/add', async (c) => {
 
 // API: Update gallery item
 app.post('/api/gallery/:id/update', async (c) => {
+  if (!hasAdminCookie(c)) return c.json({ success: false, error: 'Unauthorized' }, 401)
   const db = c.env.DB
   const id = c.req.param('id')
   try {
@@ -1591,30 +1671,28 @@ app.post('/api/gallery/:id/update', async (c) => {
 
     // Handle new image upload for edit
     const imageFile = body['image_file'] as File
-    if (imageFile && imageFile.size) {
-      if (imageFile.size > 10 * 1024 * 1024) return c.json({ success: false, error: 'Image too large. Max 10MB.' })
-      const buffer = await imageFile.arrayBuffer()
-      const bytes = new Uint8Array(buffer)
-      const chunkSize = 8192
-      let binary = ''
-      for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-        binary += String.fromCharCode(...bytes.slice(i, i + chunkSize))
-      }
-      fileUrl = `data:${imageFile.type};base64,${btoa(binary)}`
+    if (imageFile && typeof imageFile !== 'string' && imageFile.size) {
+      const saved = await saveImageToMediaUploads(db, imageFile, { fallbackName: 'gallery-edit' })
+      if (!saved.ok) return c.json({ success: false, error: saved.error }, 400)
+      fileUrl = saved.url
     }
 
     // Handle new video upload for edit
     const videoFile = body['video_file'] as File
-    if (videoFile && videoFile.size) {
-      if (videoFile.size > 10 * 1024 * 1024) return c.json({ success: false, error: 'Video too large. Max 10MB.' })
+    if (videoFile && typeof videoFile !== 'string' && videoFile.size) {
+      if (videoFile.size > 900 * 1024) return c.json({ success: false, error: 'Video exceeds 900 KB database upload limit. Paste a YouTube URL instead.' }, 400)
       const buffer = await videoFile.arrayBuffer()
       const bytes = new Uint8Array(buffer)
-      const chunkSize = 8192
-      let binary = ''
-      for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-        binary += String.fromCharCode(...bytes.slice(i, i + chunkSize))
-      }
-      fileUrl = `data:${videoFile.type};base64,${btoa(binary)}`
+      let mediaId: number | null = null
+      try {
+        const mr = await db.prepare(`INSERT INTO media_uploads (uploader_type, file_name, file_type, mime_type, file_url, image_blob, file_size) VALUES ('admin',?,?,?,?,?,?)`)
+          .bind(videoFile.name || 'gallery-video', 'video', videoFile.type, '', bytes, bytes.byteLength).run()
+        mediaId = Number(mr.meta.last_row_id || 0) || null
+        if (mediaId) {
+          await db.prepare(`UPDATE media_uploads SET file_url = ? WHERE id = ?`).bind(`/api/media/${mediaId}`, mediaId).run()
+        }
+      } catch(_) {}
+      fileUrl = mediaId ? `/api/media/${mediaId}` : `data:${videoFile.type};base64,${bytesToBase64(bytes)}`
     }
 
     // Handle YouTube URL in edit
@@ -1644,6 +1722,7 @@ app.post('/api/gallery/:id/update', async (c) => {
 
 // API: Delete gallery item
 app.post('/api/gallery/:id/delete', async (c) => {
+  if (!hasAdminCookie(c)) return c.json({ success: false, error: 'Unauthorized' }, 401)
   const db = c.env.DB
   const id = c.req.param('id')
   try {
@@ -1656,6 +1735,7 @@ app.post('/api/gallery/:id/delete', async (c) => {
 
 // API: Toggle gallery item active
 app.post('/api/gallery/:id/toggle', async (c) => {
+  if (!hasAdminCookie(c)) return c.json({ success: false, error: 'Unauthorized' }, 401)
   const db = c.env.DB
   const id = c.req.param('id')
   try {
@@ -1680,32 +1760,24 @@ app.get('/admin/media-gallery', async (c) => {
   const db = c.env.DB
   let media: any[] = []
   try {
-    const result = await db.prepare(`SELECT id, file_name, file_type, mime_type, file_size, file_url, created_at FROM media_uploads ORDER BY created_at DESC LIMIT 200`).all()
-    media = result.results || []
+    const result = await db.prepare(`SELECT id, file_name, file_type, mime_type, file_size, CASE WHEN file_url LIKE 'data:%' THEN '' ELSE file_url END AS file_url, created_at FROM media_uploads ORDER BY created_at DESC, id DESC LIMIT 300`).all()
+    media = (result.results || []).map((m: any) => {
+      const displayUrl = (m.file_url && (String(m.file_url).startsWith('/') || String(m.file_url).startsWith('http'))) ? m.file_url : `/api/media/${m.id}`
+      return { ...m, file_url: displayUrl, display_url: displayUrl }
+    })
   } catch (e) {}
   return c.html(adminMediaGalleryPage(media))
 })
 
 app.post('/api/admin/upload-banner', async (c) => {
+  if (!hasAdminCookie(c)) return c.json({ success: false, error: 'Unauthorized' }, 401)
   const db = c.env.DB
   try {
     const body = await c.req.parseBody()
     const file = body['banner_image'] as File
-    if (!file || !file.size) return c.json({ success: false, error: 'No file' })
-    if (file.size > 10 * 1024 * 1024) return c.json({ success: false, error: 'File too large (max 10MB)' })
-    const buffer = await file.arrayBuffer()
-    const bytes = new Uint8Array(buffer)
-    const chunkSize = 8192
-    let binary = ''
-    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-      binary += String.fromCharCode(...bytes.slice(i, i + chunkSize))
-    }
-    const b64 = btoa(binary)
-    const dataUrl = `data:${file.type};base64,${b64}`
-    const mr = await db.prepare(`INSERT INTO media_uploads (uploader_type, file_name, file_type, mime_type, file_url, file_size) VALUES ('admin',?,?,?,?,?)`)
-      .bind(file.name || 'banner', 'image', file.type, dataUrl, file.size).run()
-    const mediaId = mr.meta.last_row_id as number
-    return c.json({ success: true, url: dataUrl, media_id: mediaId })
+    const saved = await saveImageToMediaUploads(db, file, { fallbackName: 'banner' })
+    if (!saved.ok) return c.json({ success: false, error: saved.error }, 400)
+    return c.json({ success: true, url: saved.url, media_id: saved.mediaId })
   } catch (e: any) {
     return c.json({ success: false, error: String(e?.message || 'Upload failed') })
   }
@@ -1721,21 +1793,9 @@ app.post('/admin/ads/save', async (c) => {
 
   // Handle direct banner image upload
   const bannerFile = body['banner_image_file'] as File
-  if (bannerFile && bannerFile.size && bannerFile.size <= 10 * 1024 * 1024) {
-    const buffer = await bannerFile.arrayBuffer()
-    const bytes = new Uint8Array(buffer)
-    const chunkSize = 8192
-    let binary = ''
-    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-      binary += String.fromCharCode(...bytes.slice(i, i + chunkSize))
-    }
-    const b64 = btoa(binary)
-    imageUrl = `data:${bannerFile.type};base64,${b64}`
-    // Also save to media gallery
-    try {
-      await db.prepare(`INSERT INTO media_uploads (uploader_type, file_name, file_type, mime_type, file_url, file_size) VALUES ('admin',?,?,?,?,?)`)
-        .bind(bannerFile.name || 'banner', 'image', bannerFile.type, imageUrl, bannerFile.size).run()
-    } catch(_) {}
+  if (bannerFile && typeof bannerFile !== 'string' && bannerFile.size) {
+    const saved = await saveImageToMediaUploads(db, bannerFile, { fallbackName: 'banner' })
+    if (saved.ok) imageUrl = saved.url
   }
 
   try {
@@ -1796,11 +1856,11 @@ app.post('/admin/technology/save', async (c) => {
     }
     // Handle technology_hero_image file upload
     const file = body['technology_hero_image_file'] as File | undefined
-    if (file && file.size > 0) {
-      const buf = await file.arrayBuffer()
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)))
-      const dataUrl = `data:${file.type};base64,${b64}`
-      await db.prepare(`INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind('technology_hero_image', dataUrl).run()
+    if (file && typeof file !== 'string' && file.size > 0) {
+      const saved = await saveImageToMediaUploads(db, file, { fallbackName: 'technology-hero' })
+      if (saved.ok) {
+        await db.prepare(`INSERT INTO site_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind('technology_hero_image', saved.url).run()
+      }
     }
     return c.redirect('/admin/technology?saved=1')
   } catch (e: any) {
@@ -1843,17 +1903,11 @@ app.post('/admin/settings/save', async (c) => {
     }
     // Handle hero bg image upload - takes priority over URL
     const heroImgFile = body['hero_bg_image_file'] as File
-    if (heroImgFile && heroImgFile.size) {
-      const buffer = await heroImgFile.arrayBuffer()
-      const bytes = new Uint8Array(buffer)
-      const chunkSize = 8192
-      let binary = ''
-      for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-        binary += String.fromCharCode(...bytes.slice(i, i + chunkSize))
+    if (heroImgFile && typeof heroImgFile !== 'string' && heroImgFile.size) {
+      const saved = await saveImageToMediaUploads(db, heroImgFile, { fallbackName: 'hero-bg' })
+      if (saved.ok) {
+        await db.prepare(`INSERT INTO site_settings (key,value) VALUES ('hero_bg_image',?) ON CONFLICT(key) DO UPDATE SET value=?, updated_at=CURRENT_TIMESTAMP`).bind(saved.url, saved.url).run()
       }
-      const b64 = btoa(binary)
-      const dataUrl = `data:${heroImgFile.type};base64,${b64}`
-      await db.prepare(`INSERT INTO site_settings (key,value) VALUES ('hero_bg_image',?) ON CONFLICT(key) DO UPDATE SET value=?, updated_at=CURRENT_TIMESTAMP`).bind(dataUrl, dataUrl).run()
     }
     // Handle section image uploads
     const sectionImgKeys: Record<string, string> = {
@@ -1863,17 +1917,11 @@ app.post('/admin/settings/save', async (c) => {
     }
     for (const [fileField, settingKey] of Object.entries(sectionImgKeys)) {
       const imgFile = body[fileField] as File
-      if (imgFile && imgFile.size) {
-        const buffer = await imgFile.arrayBuffer()
-        const bytes = new Uint8Array(buffer)
-        const chunkSize = 8192
-        let binary = ''
-        for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-          binary += String.fromCharCode(...bytes.slice(i, i + chunkSize))
+      if (imgFile && typeof imgFile !== 'string' && imgFile.size) {
+        const saved = await saveImageToMediaUploads(db, imgFile, { fallbackName: settingKey })
+        if (saved.ok) {
+          await db.prepare(`INSERT INTO site_settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=?, updated_at=CURRENT_TIMESTAMP`).bind(settingKey, saved.url, saved.url).run()
         }
-        const b64 = btoa(binary)
-        const dataUrl = `data:${imgFile.type};base64,${b64}`
-        await db.prepare(`INSERT INTO site_settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=?, updated_at=CURRENT_TIMESTAMP`).bind(settingKey, dataUrl, dataUrl).run()
       }
     }
   } catch (e) { console.error(e) }
@@ -1935,28 +1983,11 @@ app.post('/api/upload-service-image', async (c) => {
     if (!file.type.startsWith('image/')) {
       return c.json({ success: false, error: 'Invalid file type. Please upload an image.' })
     }
-    if (file.size > 10 * 1024 * 1024) {
-      return c.json({ success: false, error: `Image too large (${(file.size/1024/1024).toFixed(1)} MB). Max 10 MB.` })
-    }
-    const buffer = await file.arrayBuffer()
-    const bytes = new Uint8Array(buffer)
-    const chunkSize = 8192
-    let binary = ''
-    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-      binary += String.fromCharCode(...Array.from(bytes.slice(i, i + chunkSize)))
-    }
-    const dataUrl = `data:${file.type};base64,${btoa(binary)}`
-    let mediaId: number | null = null
-    try {
-      const mr = await db.prepare(
-        `INSERT INTO media_uploads (uploader_type, file_name, file_type, mime_type, file_url, file_size) VALUES ('admin',?,?,?,?,?)`
-      ).bind(file.name || settingKey, 'image', file.type, dataUrl, file.size).run()
-      mediaId = (mr.meta.last_row_id ?? null) as number | null
-    } catch (_) {}
-    const mediaUrl = mediaId ? `/api/media/${mediaId}` : dataUrl
+    const saved = await saveImageToMediaUploads(db, file, { fallbackName: settingKey })
+    if (!saved.ok) return c.json({ success: false, error: saved.error }, 400)
     await db.prepare(`INSERT INTO site_settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=?, updated_at=CURRENT_TIMESTAMP`)
-      .bind(settingKey, mediaUrl, mediaUrl).run()
-    return c.json({ success: true, url: mediaUrl, key: settingKey, media_id: mediaId })
+      .bind(settingKey, saved.url, saved.url).run()
+    return c.json({ success: true, url: saved.url, key: settingKey, media_id: saved.mediaId })
   } catch (e: any) {
     return c.json({ success: false, error: String(e?.message || 'Upload failed') })
   }
@@ -1978,11 +2009,19 @@ app.post('/api/media/:id/delete', async (c) => {
 // API: List uploaded media (images and videos)
 app.get('/api/media', async (c) => {
   const db = c.env.DB
+  const filterType = (c.req.query('type') || '').trim()
   try {
-    const result = await db.prepare(`SELECT id, file_name, file_type, mime_type, file_size, file_url, created_at FROM media_uploads ORDER BY created_at DESC LIMIT 200`).all()
-    return c.json({ success: true, items: result.results || [] })
+    const query = (filterType === 'image' || filterType === 'video')
+      ? db.prepare(`SELECT id, file_name, file_type, mime_type, file_size, CASE WHEN file_url LIKE 'data:%' THEN '' ELSE file_url END AS file_url, created_at FROM media_uploads WHERE file_type = ? ORDER BY created_at DESC, id DESC LIMIT 300`).bind(filterType)
+      : db.prepare(`SELECT id, file_name, file_type, mime_type, file_size, CASE WHEN file_url LIKE 'data:%' THEN '' ELSE file_url END AS file_url, created_at FROM media_uploads ORDER BY created_at DESC, id DESC LIMIT 300`)
+    const result = await query.all()
+    const items = (result.results || []).map((m: any) => {
+      const displayUrl = (m.file_url && (String(m.file_url).startsWith('/') || String(m.file_url).startsWith('http'))) ? m.file_url : `/api/media/${m.id}`
+      return { ...m, file_url: displayUrl, display_url: displayUrl }
+    })
+    return c.json({ success: true, items, media: items })
   } catch(e) {
-    return c.json({ success: false, items: [] })
+    return c.json({ success: false, items: [], media: [] })
   }
 })
 
@@ -2327,19 +2366,12 @@ app.post('/submit-property', async (c) => {
   const facilities = (body.facilities_raw as string || '').split('\n').map((s: string) => s.trim()).filter(Boolean)
   let images: string[] = []
 
-  // Handle uploaded image files
+  // Handle uploaded image files via D1-safe media_uploads
   const imgFiles = Array.isArray(body['image_files']) ? body['image_files'] as File[] : (body['image_files'] ? [body['image_files'] as File] : [])
   for (const file of imgFiles) {
-    if (file && file.size && file.size <= 10 * 1024 * 1024) {
-      const buffer = await file.arrayBuffer()
-      const bytes = new Uint8Array(buffer)
-      const chunkSize = 8192
-      let binary = ''
-      for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-        binary += String.fromCharCode(...bytes.slice(i, i + chunkSize))
-      }
-      const b64 = btoa(binary)
-      images.push(`data:${file.type};base64,${b64}`)
+    if (file && typeof file !== 'string' && file.size > 0) {
+      const saved = await saveImageToMediaUploads(db, file, { uploaderType: 'public', fallbackName: 'submission' })
+      if (saved.ok) images.push(saved.url)
     }
   }
 
@@ -3100,7 +3132,7 @@ ${content}
 <!-- FOOTER -->
 <footer style="background: var(--forest); color: #b0b8b0;">
   <div class="max-w-7xl mx-auto px-6 pt-16 pb-8">
-    <div class="grid grid-cols-1 md:grid-cols-4 gap-12 mb-12">
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-12 mb-12 footer-grid">
       <!-- Brand -->
       <div>
         <a href="/" style="text-decoration:none; display:flex; align-items:center; gap:12px; margin-bottom:20px;">
@@ -3252,13 +3284,13 @@ ${content}
 function homePage(featured: any[], recent: any[], settings: Record<string, string>, ads: any[], recentPosts: any[] = []): string {
   const rawHeroTitle = (settings.hero_title || '').trim()
   const heroTitleHtml = formatMultiline(
-    !rawHeroTitle || rawHeroTitle.includes('Find Your Premium Property') ? 'Hospitality & Property\nManagement' : rawHeroTitle,
+    !rawHeroTitle || rawHeroTitle.replace(/\s+/g, ' ').includes('Find Your Premium Property') ? 'Hospitality & Property\nManagement' : rawHeroTitle,
     'Hospitality & Property\nManagement'
   )
   const heroSubtitle = escHtml((settings.hero_subtitle && settings.hero_subtitle.trim()) || 'Purecrest delivers premier hotel & short-let management, property sales, leasing, and real estate advisory across Nigeria — helping property owners maximize returns and guests enjoy exceptional stays.')
-  const heroBg = settings.hero_bg_image && settings.hero_bg_image !== '/static/hero-bg.jpg'
+  const heroBg = settings.hero_bg_image && settings.hero_bg_image !== '/static/hero-bg.jpg' && !settings.hero_bg_image.startsWith('/src/')
     ? settings.hero_bg_image
-    : '/src/assets/images/hero_purecrest_residence_1795731930518.jpg'
+    : '/assets/images/hero_purecrest_residence_1795731930518.jpg'
   const heroCta1Text = escHtml('Our Services')
   const heroCta1Url = escHtml('/services')
   const heroCta2Text = escHtml('Contact Us')
@@ -3280,15 +3312,12 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
   const content = `
   <!-- HERO SECTION: Hospitality & Property Management -->
   <section style="background:var(--forest); position:relative; overflow:hidden; min-height:560px; display:flex; align-items:center;">
-    <img src="${escHtml(heroBg)}" alt="Purecrest Hospitality and Property Management" style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center;" onerror="this.src='/static/hero-bg.jpg'" />
+    <img src="${escHtml(heroBg)}" alt="Purecrest Hospitality and Property Management" style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center;" onerror="this.src='/assets/images/hero_purecrest_residence_1795731930518.jpg'" />
     <div style="position:absolute; inset:0; background:linear-gradient(100deg, rgba(5,28,18,0.95) 0%, rgba(5,28,18,0.84) 55%, rgba(11,31,58,0.68) 100%);"></div>
 
     <div class="max-w-7xl mx-auto px-6 w-full" style="position:relative; z-index:2; padding-top:84px; padding-bottom:90px;">
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
         <div class="lg:col-span-8">
-          <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.72rem; font-weight:700; letter-spacing:0.2em; text-transform:uppercase; color:var(--gold); margin-bottom:16px;">
-            Hospitality Management · Property Advisory · Nigeria
-          </p>
           <h1 style="font-family:'DM Serif Display',serif; font-size:clamp(2.45rem,5vw,4.2rem); line-height:1.06; color:#fff; margin-bottom:22px; font-weight:400; text-wrap:balance; max-width:740px;">
             ${heroTitleHtml}
           </h1>
@@ -3536,7 +3565,6 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
         <a href="/hospitality" class="md:col-span-7 service-card group" style="text-decoration:none; display:flex; flex-direction:column; background:var(--forest); border-color:rgba(201,168,76,0.28); border-top:4px solid var(--gold);">
           <div style="padding:36px 32px; flex:1; display:flex; flex-direction:column; justify-content:space-between;">
             <div>
-              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold); margin-bottom:12px;">01 · Hospitality Division</p>
               <h3 style="font-family:'DM Serif Display',serif; font-size:clamp(1.55rem,2.4vw,1.95rem); color:#fff; margin-bottom:14px; font-weight:400; line-height:1.18;">${escHtml(settings.service_card_1_title || 'Purecrest Hospitality')}</h3>
               <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.94rem; line-height:1.8; color:rgba(255,255,255,0.78); margin-bottom:24px; max-width:560px;">${escHtml(settings.service_card_1_desc || 'Hotel management, serviced apartments, and short-let operations delivering exceptional guest experiences and maximum owner returns.')}</p>
             </div>
@@ -3550,7 +3578,6 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
         <a href="/property" class="md:col-span-5 service-card group" style="text-decoration:none; display:flex; flex-direction:column; background:#F9F9F7; border-color:#dfd9cc; border-top:4px solid var(--navy);">
           <div style="padding:36px 30px; flex:1; display:flex; flex-direction:column; justify-content:space-between;">
             <div>
-              <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.7rem; font-weight:700; letter-spacing:0.18em; text-transform:uppercase; color:var(--gold-dark); margin-bottom:12px;">02 · Real Estate Division</p>
               <h3 style="font-family:'DM Serif Display',serif; font-size:clamp(1.45rem,2.2vw,1.8rem); color:var(--forest); margin-bottom:14px; font-weight:400; line-height:1.18;">${escHtml(settings.service_card_2_title || 'Purecrest Property')}</h3>
               <p style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.92rem; line-height:1.8; color:#555; margin-bottom:24px;">${escHtml(settings.service_card_2_desc || 'Real estate development, property sales, leasing, and investment advisory creating lasting value across Nigeria.')}</p>
             </div>
@@ -3632,7 +3659,7 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
 
         <!-- OTA Platform Brand Icons Grid -->
         <div class="lg:col-span-6">
-          <div class="grid grid-cols-2 gap-4">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <!-- Airbnb Card -->
             <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:22px;">
               <div class="flex items-center gap-3 mb-3">
@@ -3668,25 +3695,25 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#00254D" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.2-1.1.7l-.3.7 6 3.5-3.3 3.3-2.5-.5-.6.6 3.2 2 2 3.2.6-.6-.5-2.5 3.3-3.3 3.5 6 .7-.3c.5-.2.8-.6.7-1.1z"/></svg>
                 </div>
                 <div>
-                  <h3 style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.98rem; font-weight:700; color:#fff; margin:0;">Expedia Group</h3>
+                  <h3 style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.98rem; font-weight:700; color:#fff; margin:0;">Expedia</h3>
                   <p style="font-size:0.72rem; color:rgba(255,255,255,0.62); margin:0;">Global Packages</p>
                 </div>
               </div>
               <p style="font-size:0.8rem; line-height:1.55; color:rgba(255,255,255,0.72); margin:0;">Partner Central integration connecting flight-and-stay bookings across networks.</p>
             </div>
 
-            <!-- Vrbo & Direct Channel Card -->
+            <!-- Vrbo Card -->
             <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:22px;">
               <div class="flex items-center gap-3 mb-3">
                 <div style="width:42px; height:42px; border-radius:10px; background:#C9A84C; display:flex; align-items:center; justify-content:center; flex-shrink:0;">
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#051C12" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
                 </div>
                 <div>
-                  <h3 style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.98rem; font-weight:700; color:#fff; margin:0;">Vrbo &amp; Direct</h3>
+                  <h3 style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.98rem; font-weight:700; color:#fff; margin:0;">Vrbo</h3>
                   <p style="font-size:0.72rem; color:rgba(255,255,255,0.62); margin:0;">Multi-Channel Sync</p>
                 </div>
               </div>
-              <p style="font-size:0.8rem; line-height:1.55; color:rgba(255,255,255,0.72); margin:0;">Seamless rate parity across Vrbo, Google Hotels, and direct commission-free bookings.</p>
+              <p style="font-size:0.8rem; line-height:1.55; color:rgba(255,255,255,0.72); margin:0;">Seamless rate parity across Vrbo, Google Hotels, and commission-free bookings.</p>
             </div>
           </div>
         </div>
@@ -3927,7 +3954,7 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
             <a href="/contact?service=training" class="whitespace-nowrap shrink-0" style="display:inline-flex;align-items:center;gap:8px;padding:13px 26px;background:transparent;color:rgba(255,255,255,0.88);border:1.5px solid rgba(255,255,255,0.3);border-radius:6px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;font-weight:600;text-decoration:none;">Request a Session</a>
           </div>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;" class="training-cards-grid">
           ${[
             {icon:'fa-medal',title:'Ethical Leadership',desc:'Values-driven leadership, decision-making ethics, and building trust within hospitality teams.'},
             {icon:'fa-concierge-bell',title:'Front Desk Excellence',desc:'Guest check-in mastery, complaint handling, upselling techniques, and professional communication.'},
@@ -3945,7 +3972,7 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
       </div>
     </div>
   </section>
-  <style>@media(max-width:900px){.training-grid{grid-template-columns:1fr !important;gap:40px !important;}}</style>
+  <style>@media(max-width:900px){.training-grid{grid-template-columns:1fr !important;gap:40px !important;}}@media(max-width:767px){.training-cards-grid{grid-template-columns:1fr !important;}}</style>
 
   <!-- RECENT BLOG POSTS -->
   ${recentPosts.length > 0 ? `
@@ -3982,8 +4009,7 @@ function homePage(featured: any[], recent: any[], settings: Record<string, strin
     </div>
   </section>
   <style>
-    @media (max-width:768px) { .blog-cards-grid { grid-template-columns:1fr !important; } }
-    @media (min-width:480px) and (max-width:768px) { .blog-cards-grid { grid-template-columns:repeat(2,1fr) !important; } }
+    @media (max-width:767px) { .blog-cards-grid { grid-template-columns:1fr !important; } }
   </style>` : ''}
 `
 
@@ -4015,7 +4041,7 @@ function propertiesPage(properties: any[], total: number, page: number, limit: n
         </div>
         <!-- Right: Image -->
         <div style="position:relative; overflow:hidden;" class="prop-hero-img">
-          <img src="/static/hero-bg.jpg" alt="Properties in Nigeria" style="width:100%; height:100%; object-fit:cover; object-position:center;" onerror="this.style.display='none'" />
+          <img src="/assets/images/hero_purecrest_residence_1795731930518.jpg" alt="Properties in Nigeria" style="width:100%; height:100%; object-fit:cover; object-position:center;" onerror="this.style.display='none'" />
           <div style="position:absolute; inset:0; background:linear-gradient(to right, var(--forest) 0%, rgba(5,28,18,0.2) 100%);"></div>
           <!-- Stats overlay -->
           <div style="position:absolute; bottom:32px; right:32px; background:rgba(255,255,255,0.96); border-radius:12px; padding:20px 24px; text-align:center; backdrop-filter:blur(8px);">
@@ -4106,8 +4132,7 @@ function propertiesPage(properties: any[], total: number, page: number, limit: n
         </div>
         <style>
           @media (max-width:1000px) { .search-form-grid { grid-template-columns:1fr 1fr 1fr !important; } }
-          @media (max-width:640px) { .search-form-grid { grid-template-columns:1fr 1fr !important; } }
-          @media (max-width:420px) { .search-form-grid { grid-template-columns:1fr !important; } }
+          @media (max-width:767px) { .search-form-grid { grid-template-columns:1fr !important; } }
           .prop-search-wrap { margin-left:0 !important; margin-right:0 !important; border-radius:0 !important; }
         </style>
       </form>
@@ -4135,8 +4160,8 @@ function propertiesPage(properties: any[], total: number, page: number, limit: n
           ${properties.map(propertyCard).join('')}
         </div>
         <style>
-          @media (max-width:900px) { .props-grid { grid-template-columns:repeat(2,1fr) !important; } }
-          @media (max-width:560px) { .props-grid { grid-template-columns:1fr !important; } }
+          @media (max-width:960px) { .props-grid { grid-template-columns:repeat(2,1fr) !important; } }
+          @media (max-width:767px) { .props-grid { grid-template-columns:1fr !important; } }
         </style>
         ${pages > 1 ? `
         <div style="display:flex; justify-content:center; gap:8px; margin-top:48px; flex-wrap:wrap;">
@@ -4167,7 +4192,7 @@ function propertiesPage(properties: any[], total: number, page: number, limit: n
         </div>`}
       </div>
       ${sidebarAds.length > 0 ? `
-      <aside style="width:280px; flex-shrink:0; display:flex; flex-direction:column; gap:16px;">
+      <aside class="sidebar-ads-aside" style="width:280px; flex-shrink:0; display:flex; flex-direction:column; gap:16px;">
         ${sidebarAds.map(adBanner).join('')}
       </aside>` : ''}
     </div>
@@ -4223,7 +4248,6 @@ function propertiesPage(properties: any[], total: number, page: number, limit: n
   </section>
   <style>
     @media (max-width:900px) { .owner-cta-grid { grid-template-columns:1fr !important; } }
-    @media (min-width:600px) and (max-width:900px) { .owner-cta-grid { grid-template-columns:1fr 1fr !important; } }
   </style>`
 
   return layout('Properties for Sale & Rent in Nigeria', content)
@@ -4295,8 +4319,7 @@ function listingsPage(properties: any[], total: number, page: number, limit: num
           </div>
         </div>
         <style>
-          @media (max-width:700px) { .listing-search-grid { grid-template-columns:1fr 1fr !important; } }
-          @media (max-width:460px) { .listing-search-grid { grid-template-columns:1fr !important; } }
+          @media (max-width:767px) { .listing-search-grid { grid-template-columns:1fr !important; } }
         </style>
       </form>
     </div>
@@ -4331,8 +4354,8 @@ function listingsPage(properties: any[], total: number, page: number, limit: num
       ${properties.map(propertyCard).join('')}
     </div>
     <style>
-      @media (max-width:900px) { .listings-grid { grid-template-columns:repeat(2,1fr) !important; } }
-      @media (max-width:560px) { .listings-grid { grid-template-columns:1fr !important; } }
+      @media (max-width:960px) { .listings-grid { grid-template-columns:repeat(2,1fr) !important; } }
+      @media (max-width:767px) { .listings-grid { grid-template-columns:1fr !important; } }
     </style>
     ${pages > 1 ? `
     <div style="display:flex; justify-content:center; gap:8px; margin-top:48px; flex-wrap:wrap;">
@@ -4510,8 +4533,7 @@ function shortletsPage(properties: any[], total: number, page: number, limit: nu
   </section>
 
   <style>
-    @media (max-width:800px) { .sl-row { grid-template-columns:1fr 1fr !important; } }
-    @media (max-width:480px) { .sl-row { grid-template-columns:1fr !important; } }
+    @media (max-width:767px) { .sl-row { grid-template-columns:1fr !important; } }
     #extraFilters.open { display:grid !important; }
   </style>
   <script>
@@ -4574,7 +4596,7 @@ function shortletsPage(properties: any[], total: number, page: number, limit: nu
     </div>
     <style>
       @media (max-width:960px) { .shortlets-grid { grid-template-columns:repeat(2,1fr) !important; } }
-      @media (max-width:520px) { .shortlets-grid { grid-template-columns:1fr !important; gap:16px !important; } }
+      @media (max-width:767px) { .shortlets-grid { grid-template-columns:1fr !important; gap:16px !important; } }
     </style>
     <!-- Pagination -->
     ${pages > 1 ? `
@@ -6616,8 +6638,7 @@ function aboutPage(settings: Record<string, string> = {}): string {
   </section>
   <style>
     @media (max-width:900px) { .about-story-grid,.mv-grid { grid-template-columns:1fr !important; } }
-    @media (max-width:640px) { .values-grid { grid-template-columns:repeat(2,1fr) !important; } }
-    @media (max-width:480px) { .values-grid { grid-template-columns:1fr !important; } }
+    @media (max-width:767px) { .values-grid { grid-template-columns:1fr !important; } }
   </style>
 
   <!-- Our Services -->
@@ -6863,6 +6884,7 @@ function trainingPage(settings: Record<string, string> = {}): string {
             <label style="display:block;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.8rem;font-weight:600;color:#444;margin-bottom:6px;">Additional Message</label>
             <textarea id="tMessage" rows="4" style="width:100%;padding:12px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.875rem;outline:none;resize:vertical;box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='#e2e8f0'"></textarea>
           </div>
+          <div id="trainingError" class="hidden mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-xs font-medium"></div>
           <button type="submit" id="trainingSubmitBtn" style="display:inline-flex;align-items:center;gap:10px;padding:14px 36px;background:linear-gradient(135deg,var(--gold),#A8883A);color:#1a1a1a;border:none;border-radius:8px;font-family:'Plus Jakarta Sans',sans-serif;font-size:0.9rem;font-weight:700;cursor:pointer;transition:opacity 0.2s;" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">
             <i class="fas fa-paper-plane"></i> Submit Training Request
           </button>
@@ -6874,6 +6896,8 @@ function trainingPage(settings: Record<string, string> = {}): string {
   <script>
     document.getElementById('trainingForm').addEventListener('submit', async function(e) {
       e.preventDefault();
+      const errBox = document.getElementById('trainingError');
+      if (errBox) { errBox.classList.add('hidden'); errBox.textContent = ''; }
       const btn = document.getElementById('trainingSubmitBtn');
       btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...';
       const course = document.getElementById('courseSelect');
@@ -6893,19 +6917,19 @@ function trainingPage(settings: Record<string, string> = {}): string {
           })
         });
         const data = await res.json();
-        if (data.success) {
+        if (res.ok && data.success) {
           document.getElementById('trainingSuccess').classList.remove('hidden');
           document.getElementById('trainingForm').reset();
           document.getElementById('trainingSuccess').scrollIntoView({behavior:'smooth',block:'center'});
         } else {
           btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Training Request';
           btn.disabled = false;
-          alert('Submission failed. Please try WhatsApp instead.');
+          if (errBox) { errBox.textContent = 'Submission failed. Please try WhatsApp instead.'; errBox.classList.remove('hidden'); }
         }
       } catch {
         btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Training Request';
         btn.disabled = false;
-        alert('Network error. Please try WhatsApp instead.');
+        if (errBox) { errBox.textContent = 'Network error. Please try WhatsApp instead.'; errBox.classList.remove('hidden'); }
       }
     });
   </script>`
@@ -7034,10 +7058,12 @@ function servicesPage(settings: Record<string, string> = {}): string {
 // HOSPITALITY PAGE
 // ==========================================
 function hospitalityPage(settings: Record<string, string> = {}): string {
+  const hospHeroBg = settings.hospitality_hero_image || '/assets/images/hero_purecrest_residence_1795731930518.jpg'
   const content = `
   <!-- HERO -->
   <section style="background:var(--forest); position:relative; overflow:hidden; min-height:460px; display:flex; align-items:center;">
-    <div style="position:absolute; inset:0; background:linear-gradient(105deg, rgba(5,28,18,0.98) 0%, rgba(5,28,18,0.9) 55%, rgba(11,31,58,0.88) 100%);"></div>
+    <img src="${escHtml(hospHeroBg)}" alt="Purecrest Hospitality Management" style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center;" onerror="this.src='/assets/images/hero_purecrest_residence_1795731930518.jpg'" />
+    <div style="position:absolute; inset:0; background:linear-gradient(105deg, rgba(5,28,18,0.88) 0%, rgba(5,28,18,0.78) 55%, rgba(11,31,58,0.72) 100%);"></div>
     <div style="position:absolute; left:0; top:0; bottom:0; width:4px; background:linear-gradient(to bottom, transparent, var(--gold), transparent);"></div>
     <div class="max-w-7xl mx-auto px-6 w-full" style="position:relative; z-index:2; padding-top:90px; padding-bottom:90px;">
       <div style="max-width:680px;">
@@ -7070,7 +7096,7 @@ function hospitalityPage(settings: Record<string, string> = {}): string {
       </div>
     </div>
   </section>
-  <style>@media (max-width:640px) { .stats-strip { grid-template-columns:repeat(2,1fr) !important; } }@media (max-width:420px) { .stats-strip { grid-template-columns:1fr !important; } }</style>
+  <style>@media (max-width:640px) { .stats-strip { grid-template-columns:1fr !important; } }</style>
 
   <!-- WHAT WE DO -->
   <section style="background:#fff; padding:90px 0;">
@@ -7098,8 +7124,7 @@ function hospitalityPage(settings: Record<string, string> = {}): string {
     </div>
   </section>
   <style>
-    @media (max-width:768px) { .hosp-grid { grid-template-columns:1fr !important; } }
-    @media (min-width:480px) and (max-width:768px) { .hosp-grid { grid-template-columns:repeat(2,1fr) !important; } }
+    @media (max-width:767px) { .hosp-grid { grid-template-columns:1fr !important; } }
   </style>
 
   <!-- HOTEL MANAGEMENT PARTNERSHIP -->
@@ -7322,8 +7347,7 @@ function propertyServicesPage(settings: Record<string, string> = {}): string {
     </div>
   </section>
   <style>
-    @media (max-width:768px) { .prop-svc-grid { grid-template-columns:1fr !important; } }
-    @media (min-width:480px) and (max-width:768px) { .prop-svc-grid { grid-template-columns:repeat(2,1fr) !important; } }
+    @media (max-width:767px) { .prop-svc-grid { grid-template-columns:1fr !important; } }
   </style>
 
   <!-- Property Types -->
@@ -7349,8 +7373,7 @@ function propertyServicesPage(settings: Record<string, string> = {}): string {
     </div>
   </section>
   <style>
-    @media (max-width:640px) { .prop-cat-grid { grid-template-columns:repeat(2,1fr) !important; } }
-    @media (max-width:420px) { .prop-cat-grid { grid-template-columns:1fr !important; } }
+    @media (max-width:767px) { .prop-cat-grid { grid-template-columns:1fr !important; } }
   </style>
 
   <!-- CTA -->
@@ -7420,7 +7443,7 @@ function otaListingPage(settings: Record<string, string> = {}): string {
             ${[
               {name:'Airbnb', detail:'Superhost-level optimization — titles, descriptions, pricing & reviews'},
               {name:'Booking.com', detail:'Genius programme optimization & property score improvement'},
-              {name:'Expedia Group', detail:'Hotels.com & Vrbo visibility enhancement across the Expedia network'},
+              {name:'Expedia', detail:'Hotels.com & Vrbo visibility enhancement across the Expedia network'},
               {name:'Google Vacation Rentals', detail:'Organic Google search presence for your property'},
               {name:'Agoda & Regional OTAs', detail:'Expanded reach to Asian and international travellers'},
             ].map(p => `
@@ -7467,7 +7490,7 @@ function otaListingPage(settings: Record<string, string> = {}): string {
   </section>
   <style>
     @media (max-width:900px) { .ota-services-grid { grid-template-columns:1fr 1fr !important; } }
-    @media (max-width:560px) { .ota-services-grid { grid-template-columns:1fr !important; } }
+    @media (max-width:767px) { .ota-services-grid { grid-template-columns:1fr !important; } }
   </style>
 
   <!-- PROCESS -->
@@ -7495,7 +7518,7 @@ function otaListingPage(settings: Record<string, string> = {}): string {
       </div>
     </div>
   </section>
-  <style>@media (max-width:768px) { .ota-process-grid { grid-template-columns:1fr 1fr !important; } }</style>
+  <style>@media (max-width:767px) { .ota-process-grid { grid-template-columns:1fr !important; } }</style>
 
   <!-- CTA -->
   <section style="background:linear-gradient(135deg,#0B1F3A,#040e1c); padding:80px 0; text-align:center; position:relative; overflow:hidden;">
@@ -7610,7 +7633,7 @@ function virtualSupportPage(settings: Record<string, string> = {}): string {
   </section>
   <style>
     @media (max-width:900px) { .vs-services-grid { grid-template-columns:1fr 1fr !important; } }
-    @media (max-width:560px) { .vs-services-grid { grid-template-columns:1fr !important; } }
+    @media (max-width:767px) { .vs-services-grid { grid-template-columns:1fr !important; } }
   </style>
 
   <!-- WHY PURECREST VIRTUAL SUPPORT -->
@@ -7639,7 +7662,7 @@ function virtualSupportPage(settings: Record<string, string> = {}): string {
             `).join('')}
           </div>
         </div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;" class="vs-stats-grid">
           ${[
             {stat:'24/7', label:'Guest Support Coverage'},
             {stat:'100%', label:'Transparent Reporting'},
@@ -7655,7 +7678,7 @@ function virtualSupportPage(settings: Record<string, string> = {}): string {
       </div>
     </div>
   </section>
-  <style>@media (max-width:900px) { .vs-why-grid { grid-template-columns:1fr !important; gap:40px !important; } }</style>
+  <style>@media (max-width:900px) { .vs-why-grid { grid-template-columns:1fr !important; gap:40px !important; } }@media (max-width:767px) { .vs-stats-grid { grid-template-columns:1fr !important; } }</style>
 
   <!-- CTA -->
   <section style="background:#fff; padding:80px 0; text-align:center;">
@@ -8078,6 +8101,7 @@ function careersPage(jobs: any[]): string {
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">Cover Letter / Why Purecrest? *</label>
             <textarea id="careerCover" rows="5" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; resize:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'"></textarea>
           </div>
+          <div id="careerError" style="display:none; background:rgba(220,38,38,0.18); border:1px solid rgba(248,113,113,0.45); color:#fecaca; padding:12px 14px; border-radius:6px; font-size:0.85rem; margin-bottom:16px;"></div>
           <button type="submit" style="width:100%; padding:14px; background:var(--gold); color:#fff; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; font-weight:700; border:none; border-radius:6px; cursor:pointer; transition:background 0.2s;" onmouseover="this.style.background='#a8883a'" onmouseout="this.style.background='var(--gold)'">
             <i class="fas fa-paper-plane" style="margin-right:8px;"></i>Submit Application
           </button>
@@ -8090,10 +8114,12 @@ function careersPage(jobs: any[]): string {
         <script>
           document.getElementById('careerForm').addEventListener('submit', async (e) => {
             e.preventDefault();
+            const errEl = document.getElementById('careerError');
+            if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
             const btn = e.target.querySelector('button[type="submit"]');
             btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin" style="margin-right:8px;"></i>Submitting...';
             try {
-              await fetch('/api/inquiries', {
+              const res = await fetch('/api/inquiries', {
                 method: 'POST', headers: {'Content-Type':'application/json'},
                 body: JSON.stringify({
                   name: document.getElementById('careerName').value,
@@ -8103,12 +8129,13 @@ function careersPage(jobs: any[]): string {
                   listing_id: 'careers'
                 })
               });
+              if (!res.ok) throw new Error('Request failed');
               document.getElementById('careerForm').style.display = 'none';
               document.getElementById('careerSuccess').style.display = 'block';
             } catch(err) {
               btn.disabled = false;
               btn.innerHTML = '<i class="fas fa-paper-plane" style="margin-right:8px;"></i>Submit Application';
-              alert('Submission failed. Please try again.');
+              if (errEl) { errEl.textContent = 'Submission failed. Please try again.'; errEl.style.display = 'block'; }
             }
           });
         </script>
@@ -8244,6 +8271,7 @@ function jobDetailPage(job: any): string {
             <label style="display:block; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; font-weight:600; color:rgba(255,255,255,0.7); margin-bottom:6px;">Cover Letter / Why Purecrest? *</label>
             <textarea id="applyCover" rows="5" required style="width:100%; padding:12px 14px; background:rgba(255,255,255,0.08); border:1.5px solid rgba(255,255,255,0.15); border-radius:6px; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.875rem; color:#fff; outline:none; resize:none; box-sizing:border-box;" onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='rgba(255,255,255,0.15)'"></textarea>
           </div>
+          <div id="applyError" style="display:none; background:rgba(220,38,38,0.18); border:1px solid rgba(248,113,113,0.45); color:#fecaca; padding:12px 14px; border-radius:6px; font-size:0.85rem; margin-bottom:16px;"></div>
           <button type="submit" style="width:100%; padding:14px; background:var(--gold); color:#fff; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.9rem; font-weight:700; border:none; border-radius:6px; cursor:pointer;" onmouseover="this.style.opacity='0.88'" onmouseout="this.style.opacity='1'">
             <i class="fas fa-paper-plane" style="margin-right:8px;"></i>Submit Application
           </button>
@@ -8257,10 +8285,12 @@ function jobDetailPage(job: any): string {
         <script>
           document.getElementById('jobApplyForm').addEventListener('submit', async (e) => {
             e.preventDefault();
+            const errEl = document.getElementById('applyError');
+            if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
             const btn = e.target.querySelector('button[type="submit"]');
             btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin" style="margin-right:8px;"></i>Submitting...';
             try {
-              await fetch('/api/inquiries', {
+              const res = await fetch('/api/inquiries', {
                 method: 'POST', headers: {'Content-Type':'application/json'},
                 body: JSON.stringify({
                   name: document.getElementById('applyName').value,
@@ -8270,12 +8300,13 @@ function jobDetailPage(job: any): string {
                   listing_id: 'careers'
                 })
               });
+              if (!res.ok) throw new Error('Request failed');
               document.getElementById('jobApplyForm').style.display = 'none';
               document.getElementById('applySuccess').style.display = 'block';
             } catch(err) {
               btn.disabled = false;
               btn.innerHTML = '<i class="fas fa-paper-plane" style="margin-right:8px;"></i>Submit Application';
-              alert('Submission failed. Please try again.');
+              if (errEl) { errEl.textContent = 'Submission failed. Please try again.'; errEl.style.display = 'block'; }
             }
           });
         </script>
@@ -8358,13 +8389,20 @@ function adminJobsPage(jobs: any[]): string {
   <script>
     async function toggleJob(id, btn) {
       try {
-        await fetch('/admin/jobs/' + id + '/toggle', { method: 'POST' });
+        const res = await fetch('/admin/jobs/' + id + '/toggle', { method: 'POST', credentials: 'same-origin' });
+        if (!res.ok) throw new Error('Request failed');
         const isActive = btn.dataset.active === '1';
         const newActive = !isActive;
         btn.dataset.active = newActive ? '1' : '0';
         btn.className = 'relative inline-flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-full transition-all ' + (newActive ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500');
         btn.innerHTML = '<span class="w-2 h-2 rounded-full ' + (newActive ? 'bg-green-500' : 'bg-gray-400') + '"></span>' + (newActive ? 'Active' : 'Inactive');
-      } catch(e) { alert('Failed to toggle status. Please try again.'); }
+      } catch(e) {
+        const toast = document.createElement('div');
+        toast.className = 'fixed bottom-6 right-6 bg-red-600 text-white px-4 py-2.5 rounded-xl shadow-lg text-sm font-medium z-50 flex items-center gap-2';
+        toast.innerHTML = '<i class="fas fa-exclamation-circle"></i><span>Failed to toggle status. Please try again.</span>';
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 3000);
+      }
     }
   </script>`
   return adminLayout('Jobs Management', content, 'jobs')
@@ -8498,8 +8536,7 @@ function investPage(settings: Record<string, string> = {}): string {
     </div>
   </section>
   <style>
-    @media (max-width:768px) { .invest-grid { grid-template-columns:1fr !important; } }
-    @media (min-width:480px) and (max-width:768px) { .invest-grid { grid-template-columns:repeat(2,1fr) !important; } }
+    @media (max-width:767px) { .invest-grid { grid-template-columns:1fr !important; } }
   </style>
 
   <!-- Investment Types -->
@@ -8557,8 +8594,7 @@ function investPage(settings: Record<string, string> = {}): string {
     </div>
   </section>
   <style>
-    @media (max-width:640px) { .steps-grid { grid-template-columns:repeat(2,1fr) !important; } }
-    @media (max-width:480px) { .steps-grid { grid-template-columns:1fr !important; } }
+    @media (max-width:767px) { .steps-grid { grid-template-columns:1fr !important; } }
   </style>
 
   <!-- Investor Form -->
@@ -8710,6 +8746,8 @@ function investPage(settings: Record<string, string> = {}): string {
             <label for="invConsent" style="font-family:'Plus Jakarta Sans',sans-serif; font-size:0.8rem; color:#555; line-height:1.6; cursor:pointer;">I consent to Purecrest contacting me regarding investment opportunities. I understand that any investment information shared is confidential and for my personal review only. *</label>
           </div>
 
+          <div id="investError" style="display:none; background:#fef2f2; border:1px solid #fecaca; color:#b91c1c; padding:12px 14px; border-radius:8px; font-size:0.85rem; font-weight:500; margin-bottom:16px;"></div>
+
           <button type="submit" style="width:100%; padding:16px; background:var(--navy); color:#fff; font-family:'Plus Jakarta Sans',sans-serif; font-size:0.95rem; font-weight:700; border:none; border-radius:8px; cursor:pointer; transition:background 0.2s; display:flex; align-items:center; justify-content:center; gap:10px;" onmouseover="this.style.background='var(--forest)'" onmouseout="this.style.background='var(--navy)'">
             <i class="fas fa-paper-plane"></i> Submit Investment Enquiry
           </button>
@@ -8728,6 +8766,8 @@ function investPage(settings: Record<string, string> = {}): string {
         <script>
           document.getElementById('investForm').addEventListener('submit', async (e) => {
             e.preventDefault();
+            const errEl = document.getElementById('investError');
+            if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
             const btn = e.target.querySelector('button[type="submit"]');
             btn.disabled = true;
             btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...';
@@ -8751,16 +8791,19 @@ function investPage(settings: Record<string, string> = {}): string {
                 })
               });
               const data = await res.json();
-              if (data.success) {
+              if (res.ok && data.success) {
                 document.getElementById('investForm').style.display = 'none';
                 document.getElementById('investSuccess').style.display = 'block';
               } else {
-                throw new Error('Server error');
+                throw new Error(data.error || 'Server error');
               }
             } catch (err) {
               btn.disabled = false;
               btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Investment Enquiry';
-              alert('Submission failed. Please try again or contact us directly at hello@purecrest.ng');
+              if (errEl) {
+                errEl.textContent = 'Submission failed. Please try again or contact us directly at hello@purecrest.ng';
+                errEl.style.display = 'block';
+              }
             }
           });
         </script>
@@ -8925,11 +8968,11 @@ function submitPropertyPage(settings: Record<string, string> = {}, errorMsg: str
       <!-- Images -->
       <div class="bg-white rounded-2xl shadow-sm p-4 sm:p-6 space-y-4">
         <h2 class="font-bold text-gray-800 flex items-center gap-2"><i class="fas fa-images text-base" style="color:var(--gold);"></i>Property Photos</h2>
-        <p class="text-sm text-gray-500">Upload clear photos of the property. Good photos increase visibility. <strong>Max 700KB per image</strong> (compress images at <a href="https://squoosh.app" target="_blank" style="color:var(--gold);">squoosh.app</a> before uploading).</p>
+        <p class="text-sm text-gray-500">Tap or drag clear photos below &mdash; images are automatically optimized before upload (max 10 MB per source file).</p>
         <div class="border-2 border-dashed rounded-xl p-6 text-center cursor-pointer hover:border-green-400 transition-colors" style="border-color:#e2e8f0;" id="imgDropzone" onclick="document.getElementById('subImgInput').click()">
           <i class="fas fa-cloud-upload-alt text-4xl text-gray-300 mb-2 block"></i>
           <p class="text-sm font-medium text-gray-600">Tap or drag photos here</p>
-          <p class="text-xs text-gray-400 mt-1">JPG, PNG, WebP - Max 10 MB each - Multiple allowed</p>
+          <p class="text-xs text-gray-400 mt-1">JPG, PNG, WebP &middot; Auto-optimized &middot; Multiple allowed</p>
           <input type="file" id="subImgInput" accept="image/*" multiple class="hidden" />
         </div>
         <div id="subImgPreviews" class="grid grid-cols-3 sm:grid-cols-4 gap-3"></div>
@@ -8955,6 +8998,7 @@ function submitPropertyPage(settings: Record<string, string> = {}, errorMsg: str
         <p><i class="fas fa-shield-alt mr-2" style="color:var(--gold);"></i><strong>Submission Agreement:</strong> By submitting this form, you confirm that you are the owner of or authorised agent for this property, and that the information provided is accurate. PureCrest reserves the right to reject submissions that do not meet our quality standards.</p>
       </div>
 
+      <div id="subError" class="hidden bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm font-medium"></div>
       <button type="submit" class="w-full btn-gold text-white py-4 rounded-xl font-bold text-base flex items-center justify-center gap-3" id="submitBtn">
         <i class="fas fa-paper-plane"></i>
         Submit Property for Review
@@ -8966,6 +9010,53 @@ function submitPropertyPage(settings: Record<string, string> = {}, errorMsg: str
     // ---- Image Upload Manager ----
     let subImages = []; // [{dataUrl, file, id}]
     let subImgCounter = 0;
+
+    function showSubError(msg) {
+      var errEl = document.getElementById('subError');
+      if (!errEl) return;
+      errEl.textContent = msg || '';
+      errEl.classList.toggle('hidden', !msg);
+    }
+
+    function compressSubmitImage(file) {
+      return new Promise(function(resolve) {
+        if (!file || !file.type || !file.type.startsWith('image/')) return resolve(file);
+        if (file.type === 'image/gif' || file.type === 'image/svg+xml' || file.size < 280 * 1024) return resolve(file);
+        var objUrl = URL.createObjectURL(file);
+        var img = new Image();
+        img.onload = async function() {
+          URL.revokeObjectURL(objUrl);
+          var w = img.naturalWidth || img.width;
+          var h = img.naturalHeight || img.height;
+          if (!w || !h) return resolve(file);
+          var outType = file.type === 'image/png' ? 'image/webp' : 'image/jpeg';
+          var ext = outType === 'image/webp' ? '.webp' : '.jpg';
+          var baseName = (file.name || 'photo').replace(/\\.[^.]+$/, '');
+          var dims = [1600, 1280, 1024, 800];
+          var quals = [0.82, 0.72, 0.62, 0.50];
+          var bestBlob = null;
+          for (var i = 0; i < dims.length; i++) {
+            var scale = Math.min(1, dims[i] / Math.max(w, h));
+            var nw = Math.max(1, Math.round(w * scale));
+            var nh = Math.max(1, Math.round(h * scale));
+            var canvas = document.createElement('canvas');
+            canvas.width = nw; canvas.height = nh;
+            var ctx = canvas.getContext('2d');
+            if (!ctx) break;
+            ctx.drawImage(img, 0, 0, nw, nh);
+            var blob = await new Promise(function(r) { canvas.toBlob(r, outType, quals[i]); });
+            if (blob && (!bestBlob || blob.size < bestBlob.size)) bestBlob = blob;
+            if (blob && blob.size <= 420 * 1024) break;
+          }
+          if (!bestBlob || bestBlob.size >= file.size) return resolve(file);
+          try {
+            resolve(new File([bestBlob], baseName + ext, { type: outType }));
+          } catch(_) { resolve(file); }
+        };
+        img.onerror = function() { URL.revokeObjectURL(objUrl); resolve(file); };
+        img.src = objUrl;
+      });
+    }
 
     function updateImgCount() {
       const count = subImages.length;
@@ -9000,18 +9091,25 @@ function submitPropertyPage(settings: Record<string, string> = {}, errorMsg: str
       renderPreviews();
     }
 
-    function addFilesToQueue(files) {
-      Array.from(files).forEach(function(file) {
-        if (!file.type.startsWith('image/')) return;
-        if (file.size > 10 * 1024 * 1024) { alert(file.name + ' is too large (max 10MB)'); return; }
-        var reader = new FileReader();
-        var imgId = ++subImgCounter;
-        reader.onload = function(ev) {
-          subImages.push({ dataUrl: ev.target.result, file: file, id: imgId });
+    async function addFilesToQueue(files) {
+      showSubError('');
+      var arr = Array.from(files || []);
+      for (var k = 0; k < arr.length; k++) {
+        var file = arr[k];
+        if (!file.type.startsWith('image/')) continue;
+        if (file.size > 10 * 1024 * 1024) { showSubError(file.name + ' is too large (max 10 MB per source file).'); continue; }
+        var readyFile = await compressSubmitImage(file);
+        var dataUrl = await new Promise(function(resolve) {
+          var reader = new FileReader();
+          reader.onload = function(ev) { resolve(ev.target.result); };
+          reader.onerror = function() { resolve(''); };
+          reader.readAsDataURL(readyFile);
+        });
+        if (dataUrl) {
+          subImages.push({ dataUrl: dataUrl, file: readyFile, id: ++subImgCounter });
           renderPreviews();
-        };
-        reader.readAsDataURL(file);
-      });
+        }
+      }
     }
 
     // File input change
@@ -9039,6 +9137,7 @@ function submitPropertyPage(settings: Record<string, string> = {}, errorMsg: str
     if(form) {
       form.addEventListener('submit', async function(e) {
         e.preventDefault();
+        showSubError('');
         var btn = document.getElementById('submitBtn');
         btn.disabled = true;
         btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading & Submitting...';
@@ -9053,12 +9152,13 @@ function submitPropertyPage(settings: Record<string, string> = {}, errorMsg: str
 
         try {
           var res = await fetch('/submit-property', { method: 'POST', body: fd });
+          if (!res.ok) throw new Error('Submission failed');
           var html = await res.text();
           document.open(); document.write(html); document.close();
         } catch(err) {
           btn.disabled = false;
           btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Property for Review';
-          alert('Submission failed. Please check your connection and try again.');
+          showSubError('Submission failed. Please check your connection and try again.');
         }
       });
     }
@@ -10185,7 +10285,7 @@ function adminPropertiesPage(properties: any[], total: number, page: number, lim
             </td>
             <td class="px-4 py-3 text-right" onclick="event.stopPropagation()">
               <div class="flex items-center justify-end gap-2">
-                <a href="/property/${p.listing_id}" target="_blank" class="text-gray-400 hover:text-blue-600"><i class="fas fa-eye"></i></a>
+                <a href="/property/${encodeURIComponent(p.listing_id || String(p.id))}" target="_blank" class="text-gray-400 hover:text-blue-600"><i class="fas fa-eye"></i></a>
                 <a href="/admin/properties/${p.id}/edit" class="text-gray-400 hover:text-emerald-600"><i class="fas fa-edit"></i></a>
                 <form method="POST" action="/admin/properties/${p.id}/delete" onsubmit="return confirmDelete(event, '${p.title?.replace(/'/g, "\\'")||"this property"}')" class="inline">
                   <button type="submit" class="text-gray-400 hover:text-red-500"><i class="fas fa-trash-alt"></i></button>
@@ -10216,6 +10316,14 @@ function adminPropertiesPage(properties: any[], total: number, page: number, lim
     function confirmDelete(e, name) {
       return confirm('Delete "' + name + '"? This cannot be undone.');
     }
+    function showAdminPropToast(msg, isError) {
+      const toast = document.createElement('div');
+      toast.className = 'fixed bottom-6 right-6 ' + (isError ? 'bg-red-600' : 'bg-green-600') + ' text-white px-5 py-3 rounded-xl shadow-lg text-sm font-medium z-50 flex items-center gap-2';
+      toast.innerHTML = '<i class="fas ' + (isError ? 'fa-exclamation-circle' : 'fa-check-circle') + '"></i><span></span>';
+      toast.querySelector('span').textContent = msg;
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 3200);
+    }
     async function bulkDelete() {
       const checked = Array.from(document.querySelectorAll('.prop-checkbox:checked')).map(c => c.value);
       if (checked.length === 0) return;
@@ -10223,7 +10331,7 @@ function adminPropertiesPage(properties: any[], total: number, page: number, lim
       const fd = new FormData();
       checked.forEach(id => fd.append('ids[]', id));
       try {
-        const res = await fetch('/admin/properties/bulk-delete', { method: 'POST', body: fd });
+        const res = await fetch('/admin/properties/bulk-delete', { method: 'POST', body: fd, credentials: 'same-origin' });
         const data = await res.json();
         if (data.success) {
           checked.forEach(id => {
@@ -10231,17 +10339,14 @@ function adminPropertiesPage(properties: any[], total: number, page: number, lim
           });
           document.getElementById('bulkDeleteBtn').classList.add('hidden');
           document.getElementById('selectAll').checked = false;
-          // Show success toast
-          const toast = document.createElement('div');
-          toast.className = 'fixed bottom-6 right-6 bg-green-600 text-white px-5 py-3 rounded-xl shadow-lg text-sm font-medium z-50 flex items-center gap-2';
-          toast.innerHTML = '<i class="fas fa-check-circle"></i> ' + data.deleted + ' propert' + (data.deleted === 1 ? 'y' : 'ies') + ' deleted';
-          document.body.appendChild(toast);
-          setTimeout(() => toast.remove(), 3000);
+          showAdminPropToast(data.deleted + ' propert' + (data.deleted === 1 ? 'y' : 'ies') + ' deleted', false);
+        } else {
+          showAdminPropToast(data.error || 'Bulk delete failed. Please try again.', true);
         }
-      } catch(e) { alert('Bulk delete failed. Please try again.'); }
+      } catch(e) { showAdminPropToast('Bulk delete failed. Please try again.', true); }
     }
     async function toggleFeatured(id, btn) {
-      try { const res = await fetch('/admin/properties/'+id+'/toggle-featured', { method:'POST' }); const data = await res.json(); if(data.success) { btn.className = data.is_featured ? 'px-3 py-1 rounded-full text-xs font-semibold transition-all bg-amber-400 text-white' : 'px-3 py-1 rounded-full text-xs font-semibold transition-all bg-gray-200 text-gray-600'; btn.innerHTML = '<i class="fas fa-star mr-1"></i>'+(data.is_featured?'Featured':'Feature'); } } catch(e) {}
+      try { const res = await fetch('/admin/properties/'+id+'/toggle-featured', { method:'POST', credentials: 'same-origin' }); const data = await res.json(); if(data.success) { btn.className = data.is_featured ? 'px-3 py-1 rounded-full text-xs font-semibold transition-all bg-amber-400 text-white' : 'px-3 py-1 rounded-full text-xs font-semibold transition-all bg-gray-200 text-gray-600'; btn.innerHTML = '<i class="fas fa-star mr-1"></i>'+(data.is_featured?'Featured':'Feature'); } } catch(e) {}
     }
   </script>`
   return adminLayout('Properties', content, 'properties')
@@ -10369,11 +10474,11 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
   <div class="max-w-4xl space-y-6 pb-12">
     <div id="propToastHost" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
 
-    ${showSavedBanner ? `<div class="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 flex items-center justify-between gap-2 text-emerald-800 text-sm font-semibold"><span><i class="fas fa-check-circle text-emerald-600 mr-1.5"></i>Property saved successfully! You can upload or edit images${isShortLetInitial ? ' and rooms' : ''} below.</span>${propId ? `<a href="/property/${propId}" target="_blank" class="text-xs px-3 py-1.5 rounded-lg bg-emerald-700 text-white hover:bg-emerald-800">View Live</a>` : ''}</div>` : ''}
+    ${showSavedBanner ? `<div class="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 flex items-center justify-between gap-2 text-emerald-800 text-sm font-semibold"><span><i class="fas fa-check-circle text-emerald-600 mr-1.5"></i>Property saved successfully! You can upload or edit images${isShortLetInitial ? ' and rooms' : ''} below.</span>${(propListingId || propId) ? `<a href="/property/${encodeURIComponent(propListingId || propId)}" target="_blank" class="text-xs px-3 py-1.5 rounded-lg bg-emerald-700 text-white hover:bg-emerald-800">View Live</a>` : ''}</div>` : ''}
 
     <div class="flex items-center justify-between">
       <a href="/admin/properties" class="text-sm text-slate-500 hover:text-slate-800 flex items-center gap-1.5 font-medium"><i class="fas fa-arrow-left"></i> Back to Properties</a>
-      ${isEdit ? `<a href="/property/${propId}" target="_blank" class="text-xs font-semibold px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"><i class="fas fa-external-link-alt mr-1"></i> Preview Listing</a>` : ''}
+      ${isEdit ? `<a href="/property/${encodeURIComponent(propListingId || propId)}" target="_blank" class="text-xs font-semibold px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"><i class="fas fa-external-link-alt mr-1"></i> Preview Listing</a>` : ''}
     </div>
 
     <form method="POST" action="/admin/properties/save" enctype="multipart/form-data"
@@ -10511,9 +10616,14 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
             </div>
             <p class="font-semibold text-slate-800 text-sm">Drag &amp; drop photos here, or click to upload</p>
             <p class="text-xs text-slate-500">JPG, PNG, WebP · Auto-optimized · Saved immediately${isEdit ? ' to this listing' : ''}</p>
-            <button type="button" id="chooseImgsBtn" class="mt-1 px-4 py-1.5 rounded-lg text-xs font-semibold text-white shadow-sm" style="background:#0B1F3A;">
-              <i class="fas fa-folder-open mr-1.5"></i>Choose Photos
-            </button>
+            <div class="mt-1 flex flex-wrap items-center justify-center gap-2">
+              <button type="button" id="chooseImgsBtn" class="px-4 py-1.5 rounded-lg text-xs font-semibold text-white shadow-sm" style="background:#0B1F3A;">
+                <i class="fas fa-folder-open mr-1.5"></i>Choose Photos
+              </button>
+              <button type="button" onclick="openPropMediaPicker('property')" class="px-4 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 shadow-sm">
+                <i class="fas fa-photo-video mr-1.5 text-amber-600"></i>Choose from Media Library
+              </button>
+            </div>
           </div>
         </div>
 
@@ -10569,7 +10679,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
               <i class="fas fa-film text-xl text-red-500"></i>
             </div>
             <p class="font-semibold text-slate-800 text-sm">Drag a video file here or click to choose</p>
-            <p class="text-xs text-slate-500">MP4, MOV, WebM · max 10 MB per file</p>
+            <p class="text-xs text-slate-500">MP4, MOV, WebM &middot; max 900 KB direct upload (or paste YouTube/Vimeo URL below)</p>
             <button type="button" id="chooseVidsBtn" class="mt-1 px-4 py-1.5 rounded-lg text-xs font-semibold text-white bg-red-600 hover:bg-red-700">
               <i class="fas fa-upload mr-1.5"></i>Choose Video
             </button>
@@ -10719,9 +10829,14 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
           <input type="file" id="roomImgReplaceInput" accept="image/*" class="hidden" />
           <div class="upload-zone" id="roomImgDropzone" style="padding:16px;">
             <p class="text-xs font-semibold text-slate-700">Drag room photos here or click to upload</p>
-            <button type="button" id="chooseRoomImgsBtn" class="mt-2 px-3 py-1.5 rounded-lg text-xs font-semibold text-white" style="background:#0B1F3A;">
-              <i class="fas fa-upload mr-1"></i>Upload Room Photos
-            </button>
+            <div class="mt-2 flex flex-wrap items-center justify-center gap-2">
+              <button type="button" id="chooseRoomImgsBtn" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-white" style="background:#0B1F3A;">
+                <i class="fas fa-upload mr-1"></i>Upload Room Photos
+              </button>
+              <button type="button" onclick="openPropMediaPicker('room')" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 bg-white text-slate-700 hover:bg-slate-50">
+                <i class="fas fa-photo-video mr-1 text-amber-600"></i>Choose from Media Library
+              </button>
+            </div>
           </div>
           <div id="roomImgStatus" class="hidden">
             <div class="prog-bar"><div id="roomImgFill" class="prog-fill"></div></div>
@@ -10746,6 +10861,28 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
             <i class="fas fa-check mr-1"></i>Save Room
           </button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Media Library Picker Modal -->
+  <div id="propMediaPickerModal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+        <div>
+          <h3 class="font-bold text-slate-900 text-base">Select Image from Media Library</h3>
+          <p class="text-xs text-slate-500 mt-0.5">Choose any uploaded or pre-seeded site image.</p>
+        </div>
+        <button type="button" onclick="closePropMediaPicker()" class="text-slate-400 hover:text-slate-700 text-lg px-2 py-1"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="px-5 py-3 border-b border-slate-100 bg-slate-50">
+        <label for="propMediaSearch" class="block text-xs font-semibold text-slate-600 mb-1">Filter by File Name</label>
+        <input id="propMediaSearch" type="text" oninput="filterPropMediaPicker()" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-amber-400" />
+      </div>
+      <div class="p-5 overflow-y-auto flex-1">
+        <div id="propMediaLoading" class="hidden text-center py-10 text-sm text-slate-500"><i class="fas fa-spinner fa-spin mr-2"></i>Loading Media Library…</div>
+        <div id="propMediaEmpty" class="hidden text-center py-10 text-sm text-slate-400">No matching images found in Media Library.</div>
+        <div id="propMediaGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3"></div>
       </div>
     </div>
   </div>
@@ -10784,40 +10921,43 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
       }, 2200);
     }
 
-    // ── CLIENT-SIDE CANVAS IMAGE COMPRESSION ────────────────────────
-    function compressImageFile(file, maxDim, quality) {
-      maxDim = maxDim || 1600;
-      quality = quality || 0.84;
+    // ── CLIENT-SIDE ADAPTIVE CANVAS IMAGE COMPRESSION (<= 420 KB) ──
+    function compressImageFile(file) {
       return new Promise(function(resolve) {
         if (!file || !file.type || !file.type.startsWith('image/')) return resolve(file);
-        if (file.type === 'image/gif' || file.type === 'image/svg+xml' || file.size < 350 * 1024) return resolve(file);
+        if (file.type === 'image/gif' || file.type === 'image/svg+xml' || file.size < 280 * 1024) return resolve(file);
         var url = URL.createObjectURL(file);
         var img = new Image();
-        img.onload = function() {
+        img.onload = async function() {
           URL.revokeObjectURL(url);
           var w = img.naturalWidth || img.width;
           var h = img.naturalHeight || img.height;
           if (!w || !h) return resolve(file);
-          var scale = Math.min(1, maxDim / Math.max(w, h));
-          var nw = Math.round(w * scale);
-          var nh = Math.round(h * scale);
-          var canvas = document.createElement('canvas');
-          canvas.width = nw;
-          canvas.height = nh;
-          var ctx = canvas.getContext('2d');
-          if (!ctx) return resolve(file);
-          ctx.drawImage(img, 0, 0, nw, nh);
           var outType = file.type === 'image/png' ? 'image/webp' : 'image/jpeg';
-          canvas.toBlob(function(blob) {
-            if (!blob || blob.size >= file.size) return resolve(file);
-            var ext = outType === 'image/webp' ? '.webp' : '.jpg';
-            var baseName = (file.name || 'photo').replace(/\\.[^.]+$/, '');
-            try {
-              resolve(new File([blob], baseName + ext, { type: outType }));
-            } catch(_) {
-              resolve(file);
-            }
-          }, outType, quality);
+          var ext = outType === 'image/webp' ? '.webp' : '.jpg';
+          var baseName = (file.name || 'photo').replace(/\\.[^.]+$/, '');
+          var dims = [1600, 1280, 1024, 800];
+          var quals = [0.82, 0.72, 0.62, 0.50];
+          var bestBlob = null;
+          for (var i = 0; i < dims.length; i++) {
+            var scale = Math.min(1, dims[i] / Math.max(w, h));
+            var nw = Math.max(1, Math.round(w * scale));
+            var nh = Math.max(1, Math.round(h * scale));
+            var canvas = document.createElement('canvas');
+            canvas.width = nw; canvas.height = nh;
+            var ctx = canvas.getContext('2d');
+            if (!ctx) break;
+            ctx.drawImage(img, 0, 0, nw, nh);
+            var blob = await new Promise(function(r) { canvas.toBlob(r, outType, quals[i]); });
+            if (blob && (!bestBlob || blob.size < bestBlob.size)) bestBlob = blob;
+            if (blob && blob.size <= 420 * 1024) break;
+          }
+          if (!bestBlob || bestBlob.size >= file.size) return resolve(file);
+          try {
+            resolve(new File([bestBlob], baseName + ext, { type: outType }));
+          } catch(_) {
+            resolve(file);
+          }
         };
         img.onerror = function() { URL.revokeObjectURL(url); resolve(file); };
         img.src = url;
@@ -10865,6 +11005,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
       try {
         var res = await fetch('/api/properties/' + PROP_ID + '/images/sync', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ images: urls })
         });
@@ -10990,7 +11131,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         showToast(file.name + ' exceeds 10 MB limit.', 'error'); return;
       }
       showStatus(imgStatus, imgFill, imgMsg, 15, 'Optimizing ' + file.name + '…');
-      var readyFile = await compressImageFile(file, 1600, 0.84);
+      var readyFile = await compressImageFile(file);
       var localUrl = URL.createObjectURL(readyFile);
       var isReplace = typeof replaceIdx === 'number' && replaceIdx >= 0 && replaceIdx < allImages.length;
       var prevItem = isReplace ? allImages[replaceIdx] : null;
@@ -11010,7 +11151,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         if (isReplace) fd.append('replace_index', String(idx));
       }
       try {
-        var res = await fetch('/api/upload-image', { method: 'POST', body: fd });
+        var res = await fetch('/api/upload-image', { method: 'POST', body: fd, credentials: 'same-origin' });
         var data = await res.json();
         if (data.success && data.url) {
           allImages[idx] = { url: data.url };
@@ -11132,7 +11273,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         return;
       }
       try {
-        var res = await fetch('/api/videos/' + id + '/delete', { method: 'POST' });
+        var res = await fetch('/api/videos/' + id + '/delete', { method: 'POST', credentials: 'same-origin' });
         var data = await res.json();
         if (data.success) {
           videoList = videoList.filter(function(v) { return v.id !== id; });
@@ -11157,7 +11298,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
       fd.append('listing_id', PROP_LIST_ID);
       fd.append('title', title || url.split('/').pop() || 'Property Video');
       try {
-        var res = await fetch('/api/upload-video', { method: 'POST', body: fd });
+        var res = await fetch('/api/upload-video', { method: 'POST', body: fd, credentials: 'same-origin' });
         var data = await res.json();
         showStatus(vidStatus, vidFill, vidMsg, 100, data.success ? 'Video added ✓' : ('Error: ' + (data.error || 'failed')));
         if (data.success) {
@@ -11182,7 +11323,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
 
     async function uploadVideoFile(file) {
       if (!file.type.startsWith('video/')) { showToast('Please choose a valid video file (MP4, MOV, WebM).', 'warn'); return; }
-      if (file.size > 10 * 1024 * 1024) { showToast('Video exceeds 10 MB — paste a YouTube/Vimeo link instead.', 'warn'); return; }
+      if (file.size > 900 * 1024) { showToast('Video exceeds 900 KB direct upload limit — paste a YouTube or Vimeo link below instead.', 'warn'); return; }
       showStatus(vidStatus, vidFill, vidMsg, 20, 'Uploading ' + file.name + '…');
       var fd = new FormData();
       fd.append('video', file);
@@ -11191,7 +11332,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
       fd.append('title', file.name.replace(/\\.[^.]+$/, '') || 'Property Video');
       try {
         showStatus(vidStatus, vidFill, vidMsg, 60, 'Uploading ' + file.name + '…');
-        var res = await fetch('/api/upload-video', { method: 'POST', body: fd });
+        var res = await fetch('/api/upload-video', { method: 'POST', body: fd, credentials: 'same-origin' });
         var data = await res.json();
         showStatus(vidStatus, vidFill, vidMsg, 100, data.success ? 'Uploaded & saved ✓' : ('Error: ' + (data.error || 'failed')));
         if (data.success) {
@@ -11338,6 +11479,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
       try {
         var res = await fetch('/api/rooms/' + editId + '/images/sync', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ images: urls })
         });
@@ -11389,7 +11531,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
       var fl = document.getElementById('roomImgFill');
       var mg = document.getElementById('roomImgMsg');
       showStatus(st, fl, mg, 20, 'Optimizing ' + file.name + '…');
-      var readyFile = await compressImageFile(file, 1600, 0.84);
+      var readyFile = await compressImageFile(file);
       var localUrl = URL.createObjectURL(readyFile);
       var isReplace = typeof replaceIdx === 'number' && replaceIdx >= 0 && replaceIdx < activeRoomImages.length;
       var prev = isReplace ? activeRoomImages[replaceIdx] : null;
@@ -11409,7 +11551,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         }
       }
       try {
-        var res = await fetch('/api/upload-image', { method: 'POST', body: fd });
+        var res = await fetch('/api/upload-image', { method: 'POST', body: fd, credentials: 'same-origin' });
         var data = await res.json();
         if (data.success && data.url) {
           activeRoomImages[idx] = { url: data.url };
@@ -11508,6 +11650,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         var endpoint = isExistingDbRoom ? ('/api/rooms/' + editId + '/update') : ('/api/properties/' + PROP_ID + '/rooms');
         var res = await fetch(endpoint, {
           method: 'POST',
+          credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
@@ -11545,7 +11688,7 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
         return;
       }
       try {
-        var res = await fetch('/api/rooms/' + roomId + '/delete', { method: 'POST' });
+        var res = await fetch('/api/rooms/' + roomId + '/delete', { method: 'POST', credentials: 'same-origin' });
         var data = await res.json();
         if (data.success) {
           roomsList = roomsList.filter(function(r) { return String(r.id) !== String(roomId); });
@@ -11594,7 +11737,107 @@ function adminPropertyFormPage(property: any, videos: any[] = [], showSavedBanne
       });
     }
 
-    // ── FORM SUBMIT ─────────────────────────────────────────────────
+    // ── MEDIA LIBRARY PICKER MODAL ──────────────────────────────────
+    var propMediaPickerMode = 'property';
+    var propMediaCache = [];
+
+    function renderPropMediaGrid(items) {
+      var grid = document.getElementById('propMediaGrid');
+      var emptyEl = document.getElementById('propMediaEmpty');
+      if (!grid) return;
+      grid.innerHTML = '';
+      if (!items || !items.length) {
+        if (emptyEl) emptyEl.classList.remove('hidden');
+        return;
+      }
+      if (emptyEl) emptyEl.classList.add('hidden');
+      items.forEach(function(m) {
+        var u = m.display_url || m.file_url || ('/api/media/' + m.id);
+        if (!u) return;
+        var card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'group text-left rounded-xl border border-slate-200 overflow-hidden bg-white hover:border-amber-500 hover:shadow-md transition-all focus:outline-none';
+        card.onclick = function() { window.selectPropMediaItem(u); };
+        card.innerHTML =
+          '<div class="aspect-[4/3] bg-slate-100 overflow-hidden">' +
+            '<img src="' + u.replace(/"/g, '&quot;') + '" class="w-full h-full object-cover group-hover:scale-105 transition-transform" loading="lazy" />' +
+          '</div>' +
+          '<div class="px-2.5 py-2"><p class="text-[11px] font-medium text-slate-700 truncate"></p></div>';
+        card.querySelector('p').textContent = m.file_name || u.split('/').pop() || 'Image';
+        grid.appendChild(card);
+      });
+    }
+
+    window.filterPropMediaPicker = function() {
+      var q = (document.getElementById('propMediaSearch')?.value || '').trim().toLowerCase();
+      var filtered = !q ? propMediaCache : propMediaCache.filter(function(m) {
+        return (m.file_name || '').toLowerCase().includes(q) || (m.display_url || m.file_url || '').toLowerCase().includes(q);
+      });
+      renderPropMediaGrid(filtered);
+    };
+
+    window.openPropMediaPicker = async function(mode) {
+      propMediaPickerMode = mode === 'room' ? 'room' : 'property';
+      var modal = document.getElementById('propMediaPickerModal');
+      var loadingEl = document.getElementById('propMediaLoading');
+      var searchEl = document.getElementById('propMediaSearch');
+      if (searchEl) searchEl.value = '';
+      if (modal) modal.classList.remove('hidden');
+      if (!propMediaCache.length) {
+        if (loadingEl) loadingEl.classList.remove('hidden');
+        try {
+          var res = await fetch('/api/media?type=image', { credentials: 'same-origin' });
+          var data = await res.json();
+          propMediaCache = Array.isArray(data.items) ? data.items : (Array.isArray(data.media) ? data.media : []);
+        } catch(_) {
+          propMediaCache = [];
+          showToast('Could not load Media Library.', 'error');
+        }
+        if (loadingEl) loadingEl.classList.add('hidden');
+      }
+      renderPropMediaGrid(propMediaCache);
+    };
+
+    window.closePropMediaPicker = function() {
+      var modal = document.getElementById('propMediaPickerModal');
+      if (modal) modal.classList.add('hidden');
+    };
+
+    window.selectPropMediaItem = async function(url) {
+      if (!url) return;
+      if (propMediaPickerMode === 'room') {
+        if (!activeRoomImages.find(function(i) { return i.url === url; })) {
+          activeRoomImages.push({ url: url });
+          renderRoomImgGrid();
+          await syncRoomImagesToServer('Room photo added from Media Library.');
+        } else {
+          showToast('Photo is already in this room gallery.', 'warn');
+        }
+      } else {
+        if (!allImages.find(function(i) { return i.url === url; })) {
+          allImages.push({ url: url });
+          renderImgGrid();
+          syncImgRaw();
+          await syncImagesToServer('Photo added from Media Library.');
+        } else {
+          showToast('Photo is already in this property gallery.', 'warn');
+        }
+      }
+      window.closePropMediaPicker();
+    };
+
+    // ── FORM SUBMIT & VALIDATION RESET ──────────────────────────────
+    var SUBMIT_BTN_HTML = '${isEdit ? '<i class="fas fa-save"></i> Update Property' : '<i class="fas fa-save"></i> Save Property'}';
+    function resetSubmitBtn() {
+      var btn = document.getElementById('submitBtn');
+      if (btn) { btn.disabled = false; btn.innerHTML = SUBMIT_BTN_HTML; }
+    }
+    var propFormEl = document.getElementById('propForm');
+    if (propFormEl) {
+      propFormEl.addEventListener('invalid', function() { resetSubmitBtn(); }, true);
+    }
+    window.addEventListener('pageshow', resetSubmitBtn);
+
     window.beforeSubmit = function() {
       syncImgRaw();
       document.getElementById('pendingVideoIds').value = pendingVidIds.join(',');
@@ -11919,6 +12162,7 @@ function adminBlogFormPage(post: any): string {
         </div>
       </div>
 
+      <div id="blogUploadAlert" class="hidden bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm font-medium"></div>
       <div class="flex gap-4">
         <button type="submit" class="btn-gold text-white px-8 py-3 rounded-xl font-semibold">${isEdit ? 'Update Post' : 'Publish Post'}</button>
         <a href="/admin/blog" class="bg-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-300">Cancel</a>
@@ -11953,6 +12197,49 @@ function adminBlogFormPage(post: any): string {
       if (url) { const text = window.getSelection()?.toString() || url; document.execCommand('insertHTML', false, '<a href="'+url+'" target="_blank">'+text+'</a>'); }
       richEditor.focus();
     }
+    function showBlogAlert(msg) {
+      const box = document.getElementById('blogUploadAlert');
+      if (!box) return;
+      box.textContent = msg || '';
+      box.classList.toggle('hidden', !msg);
+      if (msg) box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    function compressBlogImg(file) {
+      return new Promise((resolve) => {
+        if (!file || !file.type || !file.type.startsWith('image/')) return resolve(file);
+        if (file.type === 'image/gif' || file.type === 'image/svg+xml' || file.size < 280 * 1024) return resolve(file);
+        const objUrl = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = async () => {
+          URL.revokeObjectURL(objUrl);
+          const w = img.naturalWidth || img.width;
+          const h = img.naturalHeight || img.height;
+          if (!w || !h) return resolve(file);
+          const outType = file.type === 'image/png' ? 'image/webp' : 'image/jpeg';
+          const ext = outType === 'image/webp' ? '.webp' : '.jpg';
+          const base = (file.name || 'photo').replace(/\\.[^.]+$/, '');
+          const dims = [1600, 1280, 1024, 800];
+          const quals = [0.82, 0.72, 0.62, 0.50];
+          let bestBlob = null;
+          for (let i = 0; i < dims.length; i++) {
+            const scale = Math.min(1, dims[i] / Math.max(w, h));
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.max(1, Math.round(w * scale));
+            canvas.height = Math.max(1, Math.round(h * scale));
+            const ctx = canvas.getContext('2d');
+            if (!ctx) break;
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            const blob = await new Promise(r => canvas.toBlob(r, outType, quals[i]));
+            if (blob && (!bestBlob || blob.size < bestBlob.size)) bestBlob = blob;
+            if (blob && blob.size <= 420 * 1024) break;
+          }
+          if (!bestBlob || bestBlob.size >= file.size) return resolve(file);
+          try { resolve(new File([bestBlob], base + ext, { type: outType })); } catch(_) { resolve(file); }
+        };
+        img.onerror = () => { URL.revokeObjectURL(objUrl); resolve(file); };
+        img.src = objUrl;
+      });
+    }
     function insertImageInEditor() {
       const url = prompt('Enter image URL (or leave empty to upload):');
       if (url) { document.execCommand('insertHTML', false, '<img src="'+url+'" style="max-width:100%;border-radius:8px;margin:8px 0;" />'); }
@@ -11960,11 +12247,15 @@ function adminBlogFormPage(post: any): string {
         const inp = document.createElement('input'); inp.type='file'; inp.accept='image/*';
         inp.onchange = async (e) => {
           const file = e.target.files[0]; if(!file) return;
-          const fd = new FormData(); fd.append('image', file);
-          const res = await fetch('/api/upload-image', {method:'POST', body:fd});
-          const data = await res.json();
-          if(data.success) { richEditor.focus(); document.execCommand('insertHTML', false, '<img src="'+data.url+'" style="max-width:100%;border-radius:8px;margin:8px 0;" />'); }
-          else alert('Upload failed: '+(data.error||''));
+          showBlogAlert('');
+          const ready = await compressBlogImg(file);
+          const fd = new FormData(); fd.append('image', ready);
+          try {
+            const res = await fetch('/api/upload-image', {method:'POST', body:fd, credentials:'same-origin'});
+            const data = await res.json();
+            if(data.success) { richEditor.focus(); document.execCommand('insertHTML', false, '<img src="'+data.url+'" style="max-width:100%;border-radius:8px;margin:8px 0;" />'); }
+            else showBlogAlert('Upload failed: '+(data.error||'Unknown error'));
+          } catch(err) { showBlogAlert('Upload error. Please try again.'); }
         }; inp.click();
       }
       richEditor.focus();
@@ -11997,16 +12288,18 @@ function adminBlogFormPage(post: any): string {
     if (coverFileInput) {
       coverFileInput.addEventListener('change', async (e) => {
         const file = e.target.files[0]; if(!file) return;
-        const fd = new FormData(); fd.append('image', file);
+        showBlogAlert('');
+        const ready = await compressBlogImg(file);
+        const fd = new FormData(); fd.append('image', ready);
         try {
-          const res = await fetch('/api/upload-image', {method:'POST', body:fd});
+          const res = await fetch('/api/upload-image', {method:'POST', body:fd, credentials:'same-origin'});
           const data = await res.json();
           if(data.success) {
             coverPreview.src = data.url;
             coverImageUrl.value = data.url;
             coverPreviewWrap.classList.remove('hidden');
-          } else { alert('Upload failed: '+(data.error||'')); }
-        } catch(err) { alert('Upload error'); }
+          } else { showBlogAlert('Upload failed: '+(data.error||'Unknown error')); }
+        } catch(err) { showBlogAlert('Upload error. Please try again.'); }
         e.target.value = '';
       });
     }
@@ -12249,11 +12542,12 @@ function adminMediaGalleryPage(media: any[]): string {
 
   const renderCard = (m: any) => {
     const isVideo = m.file_type === 'video'
+    const imgUrl = m.display_url || m.file_url || ('/api/media/' + m.id)
     const mediaEl = isVideo
       ? `<div class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900"><i class="fas fa-video text-2xl text-gray-400 mb-1"></i><span class="text-xs text-gray-400">${(m.mime_type||'video').replace('video/','').toUpperCase()}</span></div>`
-      : `<img src="${m.file_url||''}" alt="${m.file_name||'media'}" class="absolute inset-0 w-full h-full object-cover" loading="lazy" onerror="this.parentElement.parentElement.style.opacity='0.4'" />`
+      : `<img src="${imgUrl}" alt="${m.file_name||'media'}" class="absolute inset-0 w-full h-full object-cover" loading="lazy" onerror="this.parentElement.parentElement.style.opacity='0.4'" />`
     return `
-    <div class="group relative bg-white rounded-xl overflow-hidden shadow-sm hover:shadow-md transition-all cursor-pointer media-card" onclick="copyMediaUrl('${m.id}')" data-url="${m.file_url||''}" data-id="${m.id}" data-type="${m.file_type||'image'}">
+    <div class="group relative bg-white rounded-xl overflow-hidden shadow-sm hover:shadow-md transition-all cursor-pointer media-card" onclick="copyMediaUrl('${m.id}')" data-url="${imgUrl}" data-id="${m.id}" data-type="${m.file_type||'image'}">
       <div class="relative" style="padding-top:75%;">
         ${mediaEl}
         <div class="absolute top-2 left-2"><span class="text-xs px-1.5 py-0.5 rounded font-bold ${isVideo ? 'bg-red-600 text-white' : 'bg-blue-600 text-white'}">${isVideo ? '▶' : '🖼'}</span></div>
@@ -12339,6 +12633,57 @@ function adminMediaGalleryPage(media: any[]): string {
       if(notif) { notif.classList.remove('hidden'); setTimeout(()=>notif.classList.add('hidden'),2500); }
     }
 
+    function showMediaToast(msg, isError) {
+      const notif = document.getElementById('copyNotif');
+      const msgEl = document.getElementById('copyNotifMsg');
+      if (!notif || !msgEl) return;
+      msgEl.textContent = msg;
+      notif.className = 'fixed top-4 right-4 z-50 text-white px-4 py-2 rounded-xl shadow-lg text-sm font-medium flex items-center gap-2 ' + (isError ? 'bg-red-600' : 'bg-emerald-500');
+      notif.classList.remove('hidden');
+      setTimeout(() => {
+        notif.classList.add('hidden');
+        notif.className = 'hidden fixed top-4 right-4 z-50 bg-emerald-500 text-white px-4 py-2 rounded-xl shadow-lg text-sm font-medium flex items-center gap-2';
+        msgEl.textContent = 'URL copied to clipboard!';
+      }, 3200);
+    }
+
+    function compressMediaLibImg(file) {
+      return new Promise((resolve) => {
+        if (!file || !file.type || !file.type.startsWith('image/')) return resolve(file);
+        if (file.type === 'image/gif' || file.type === 'image/svg+xml' || file.size < 280 * 1024) return resolve(file);
+        const objUrl = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = async () => {
+          URL.revokeObjectURL(objUrl);
+          const w = img.naturalWidth || img.width;
+          const h = img.naturalHeight || img.height;
+          if (!w || !h) return resolve(file);
+          const outType = file.type === 'image/png' ? 'image/webp' : 'image/jpeg';
+          const ext = outType === 'image/webp' ? '.webp' : '.jpg';
+          const base = (file.name || 'photo').replace(/\\.[^.]+$/, '');
+          const dims = [1600, 1280, 1024, 800];
+          const quals = [0.82, 0.72, 0.62, 0.50];
+          let bestBlob = null;
+          for (let i = 0; i < dims.length; i++) {
+            const scale = Math.min(1, dims[i] / Math.max(w, h));
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.max(1, Math.round(w * scale));
+            canvas.height = Math.max(1, Math.round(h * scale));
+            const ctx = canvas.getContext('2d');
+            if (!ctx) break;
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            const blob = await new Promise(r => canvas.toBlob(r, outType, quals[i]));
+            if (blob && (!bestBlob || blob.size < bestBlob.size)) bestBlob = blob;
+            if (blob && blob.size <= 420 * 1024) break;
+          }
+          if (!bestBlob || bestBlob.size >= file.size) return resolve(file);
+          try { resolve(new File([bestBlob], base + ext, { type: outType })); } catch(_) { resolve(file); }
+        };
+        img.onerror = () => { URL.revokeObjectURL(objUrl); resolve(file); };
+        img.src = objUrl;
+      });
+    }
+
     async function uploadGalleryFiles(input, fileType) {
       const files = Array.from(input.files || []);
       if(!files.length) return;
@@ -12347,40 +12692,44 @@ function adminMediaGalleryPage(media: any[]): string {
       if(progressEl) progressEl.classList.remove('hidden');
       let uploaded = 0;
       for(const file of files) {
-        if(file.size > 10 * 1024 * 1024) {
-          alert(file.name + ' is too large. Max 10MB per file.');
-          continue;
-        }
-        if(msgEl) msgEl.textContent = 'Uploading ' + (uploaded+1) + ' of ' + files.length + ': ' + file.name;
-        const fd = new FormData();
         if(fileType === 'image') {
-          fd.append('image', file);
+          if(file.size > 10 * 1024 * 1024) {
+            showMediaToast(file.name + ' is too large. Max 10 MB per image.', true);
+            continue;
+          }
+          if(msgEl) msgEl.textContent = 'Optimizing & uploading ' + (uploaded+1) + ' of ' + files.length + ': ' + file.name;
+          const ready = await compressMediaLibImg(file);
+          const fd = new FormData();
+          fd.append('image', ready);
           try {
-            const res = await fetch('/api/upload-image', { method: 'POST', body: fd });
+            const res = await fetch('/api/upload-image', { method: 'POST', body: fd, credentials: 'same-origin' });
             const data = await res.json();
-            if(data.success) { uploaded++; addMediaCard(data.media_id, file.name, data.url, file.size, 'image'); }
-            else alert('Upload failed: ' + (data.error||'unknown error'));
-          } catch(e) { console.error(e); }
+            if(data.success) { uploaded++; addMediaCard(data.media_id, ready.name, data.url, ready.size, 'image'); }
+            else showMediaToast('Upload failed: ' + (data.error || 'unknown error'), true);
+          } catch(e) { showMediaToast('Network error uploading ' + file.name, true); }
         } else {
+          if(file.size > 900 * 1024) {
+            showMediaToast(file.name + ' exceeds 900 KB direct upload limit.', true);
+            continue;
+          }
+          if(msgEl) msgEl.textContent = 'Uploading ' + (uploaded+1) + ' of ' + files.length + ': ' + file.name;
+          const fd = new FormData();
           fd.append('video', file);
           fd.append('property_id', '');
           fd.append('listing_id', '');
           fd.append('title', file.name);
           try {
-            const res = await fetch('/api/upload-video', { method: 'POST', body: fd });
+            const res = await fetch('/api/upload-video', { method: 'POST', body: fd, credentials: 'same-origin' });
             const data = await res.json();
             if(data.success) { uploaded++; addMediaCard(data.video_id||Date.now(), file.name, data.url, file.size, 'video'); }
-            else alert('Upload failed: ' + (data.error||'unknown error'));
-          } catch(e) { console.error(e); }
+            else showMediaToast('Upload failed: ' + (data.error || 'unknown error'), true);
+          } catch(e) { showMediaToast('Network error uploading ' + file.name, true); }
         }
       }
       if(progressEl) progressEl.classList.add('hidden');
       input.value = '';
       if(uploaded > 0) {
-        const notif = document.getElementById('copyNotif');
-        const msg = document.getElementById('copyNotifMsg');
-        if(msg) msg.textContent = uploaded + ' file(s) uploaded!';
-        if(notif) { notif.classList.remove('hidden'); setTimeout(()=>{ notif.classList.add('hidden'); if(msg) msg.textContent='URL copied to clipboard!'; },3000); }
+        showMediaToast(uploaded + ' file(s) uploaded!', false);
       }
     }
 
@@ -12413,7 +12762,7 @@ function adminMediaGalleryPage(media: any[]): string {
     async function deleteMedia(id, btn) {
       if(!confirm('Delete this media file?')) return;
       try {
-        const res = await fetch('/api/media/' + id + '/delete', { method: 'POST' });
+        const res = await fetch('/api/media/' + id + '/delete', { method: 'POST', credentials: 'same-origin' });
         const data = await res.json();
         if(data.success) {
           const card = document.querySelector('[data-id="'+id+'"]');
@@ -12704,6 +13053,43 @@ function adminGalleryPage(items: any[]): string {
       }
     }
 
+    function compressGallImg(file) {
+      return new Promise((resolve) => {
+        if (!file || !file.type || !file.type.startsWith('image/')) return resolve(file);
+        if (file.type === 'image/gif' || file.type === 'image/svg+xml' || file.size < 280 * 1024) return resolve(file);
+        const objUrl = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = async () => {
+          URL.revokeObjectURL(objUrl);
+          const w = img.naturalWidth || img.width;
+          const h = img.naturalHeight || img.height;
+          if (!w || !h) return resolve(file);
+          const outType = file.type === 'image/png' ? 'image/webp' : 'image/jpeg';
+          const ext = outType === 'image/webp' ? '.webp' : '.jpg';
+          const base = (file.name || 'photo').replace(/\\.[^.]+$/, '');
+          const dims = [1600, 1280, 1024, 800];
+          const quals = [0.82, 0.72, 0.62, 0.50];
+          let bestBlob = null;
+          for (let i = 0; i < dims.length; i++) {
+            const scale = Math.min(1, dims[i] / Math.max(w, h));
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.max(1, Math.round(w * scale));
+            canvas.height = Math.max(1, Math.round(h * scale));
+            const ctx = canvas.getContext('2d');
+            if (!ctx) break;
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            const blob = await new Promise(r => canvas.toBlob(r, outType, quals[i]));
+            if (blob && (!bestBlob || blob.size < bestBlob.size)) bestBlob = blob;
+            if (blob && blob.size <= 420 * 1024) break;
+          }
+          if (!bestBlob || bestBlob.size >= file.size) return resolve(file);
+          try { resolve(new File([bestBlob], base + ext, { type: outType })); } catch(_) { resolve(file); }
+        };
+        img.onerror = () => { URL.revokeObjectURL(objUrl); resolve(file); };
+        img.src = objUrl;
+      });
+    }
+
     // ---- Add media ----
     async function submitAddMedia(type) {
       const progressEl = document.getElementById('addMediaProgress');
@@ -12717,11 +13103,12 @@ function adminGalleryPage(items: any[]): string {
         const fileInput = document.getElementById('addImgFile');
         const urlInput = document.getElementById('addImgUrl');
         if(fileInput.files[0]) {
-          fd.append('image_file', fileInput.files[0]);
+          const ready = await compressGallImg(fileInput.files[0]);
+          fd.append('image_file', ready);
         } else if(urlInput.value.trim()) {
           fd.append('file_url', urlInput.value.trim());
         } else {
-          alert('Please provide an image file or URL');
+          showNotif('Please provide an image file or URL', true);
           if(progressEl) progressEl.classList.add('hidden');
           return;
         }
@@ -12737,9 +13124,14 @@ function adminGalleryPage(items: any[]): string {
         } else if(vidUrl) {
           fd.append('file_url', vidUrl);
         } else if(fileInput.files[0]) {
+          if(fileInput.files[0].size > 900 * 1024) {
+            showNotif('Direct video upload max is 900 KB. Paste a YouTube or video URL instead.', true);
+            if(progressEl) progressEl.classList.add('hidden');
+            return;
+          }
           fd.append('video_file', fileInput.files[0]);
         } else {
-          alert('Please provide a YouTube URL, video URL, or file');
+          showNotif('Please provide a YouTube URL, video URL, or file', true);
           if(progressEl) progressEl.classList.add('hidden');
           return;
         }
@@ -12750,16 +13142,16 @@ function adminGalleryPage(items: any[]): string {
 
       try {
         if(progressMsg) progressMsg.textContent = 'Uploading media...';
-        const res = await fetch('/api/gallery/add', { method: 'POST', body: fd });
+        const res = await fetch('/api/gallery/add', { method: 'POST', body: fd, credentials: 'same-origin' });
         const data = await res.json();
         if(data.success) {
           showNotif('Media added successfully! Refreshing...');
           setTimeout(() => window.location.reload(), 1200);
         } else {
-          alert('Error: ' + (data.error || 'Upload failed'));
+          showNotif('Error: ' + (data.error || 'Upload failed'), true);
         }
       } catch(e) {
-        alert('Upload error: ' + e.message);
+        showNotif('Upload error: ' + e.message, true);
       }
       if(progressEl) progressEl.classList.add('hidden');
     }
@@ -12805,21 +13197,26 @@ function adminGalleryPage(items: any[]): string {
       const fileInput = document.getElementById('editMediaFile');
       if(fileInput.files[0]) {
         const file = fileInput.files[0];
-        if(file.type.startsWith('image/')) fd.append('image_file', file);
-        else fd.append('video_file', file);
+        if(file.type.startsWith('image/')) {
+          const ready = await compressGallImg(file);
+          fd.append('image_file', ready);
+        } else {
+          if(file.size > 900 * 1024) { showNotif('Direct video upload max is 900 KB.', true); return; }
+          fd.append('video_file', file);
+        }
       }
       try {
-        const res = await fetch('/api/gallery/' + id + '/update', { method: 'POST', body: fd });
+        const res = await fetch('/api/gallery/' + id + '/update', { method: 'POST', body: fd, credentials: 'same-origin' });
         const data = await res.json();
         if(data.success) {
           showNotif('Updated successfully!');
           document.getElementById('editItemModal').classList.add('hidden');
           setTimeout(() => window.location.reload(), 1200);
         } else {
-          alert('Error: ' + (data.error || 'Update failed'));
+          showNotif('Error: ' + (data.error || 'Update failed'), true);
         }
       } catch(e) {
-        alert('Error: ' + e.message);
+        showNotif('Error: ' + e.message, true);
       }
     }
 
@@ -12828,7 +13225,7 @@ function adminGalleryPage(items: any[]): string {
       if(event) event.stopPropagation();
       if(!confirm('Delete this gallery item?')) return;
       try {
-        const res = await fetch('/api/gallery/' + id + '/delete', { method: 'POST' });
+        const res = await fetch('/api/gallery/' + id + '/delete', { method: 'POST', credentials: 'same-origin' });
         const data = await res.json();
         if(data.success) {
           const card = document.querySelector('[data-id="'+id+'"]');
@@ -12899,17 +13296,59 @@ function adminSettingsPage(settings: Record<string, string>): string {
           <label for="heroBgUrl" class="block text-xs font-medium text-gray-600 mt-2 mb-1">Or Paste Image URL</label>
           <input type="text" name="hero_bg_image" id="heroBgUrl" value="${settings.hero_bg_image?.startsWith('data:') ? '' : (settings.hero_bg_image||'')}" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none font-mono" style="border-color:#e2e8f0;" oninput="previewHeroUrl(this.value)" />
           <script>
-            function previewHeroFile(input) {
-              const file = input.files[0]; if(!file) return;
+            function compressSettingImg(file) {
+              return new Promise((resolve) => {
+                if (!file || !file.type || !file.type.startsWith('image/')) return resolve(file);
+                if (file.type === 'image/gif' || file.type === 'image/svg+xml' || file.size < 280 * 1024) return resolve(file);
+                const objUrl = URL.createObjectURL(file);
+                const img = new Image();
+                img.onload = async () => {
+                  URL.revokeObjectURL(objUrl);
+                  const w = img.naturalWidth || img.width;
+                  const h = img.naturalHeight || img.height;
+                  if (!w || !h) return resolve(file);
+                  const outType = file.type === 'image/png' ? 'image/webp' : 'image/jpeg';
+                  const ext = outType === 'image/webp' ? '.webp' : '.jpg';
+                  const base = (file.name || 'photo').replace(/\\.[^.]+$/, '');
+                  const dims = [1600, 1280, 1024, 800];
+                  const quals = [0.82, 0.72, 0.62, 0.50];
+                  let bestBlob = null;
+                  for (let i = 0; i < dims.length; i++) {
+                    const scale = Math.min(1, dims[i] / Math.max(w, h));
+                    const canvas = document.createElement('canvas');
+                    canvas.width = Math.max(1, Math.round(w * scale));
+                    canvas.height = Math.max(1, Math.round(h * scale));
+                    const ctx = canvas.getContext('2d');
+                    if (!ctx) break;
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    const blob = await new Promise(r => canvas.toBlob(r, outType, quals[i]));
+                    if (blob && (!bestBlob || blob.size < bestBlob.size)) bestBlob = blob;
+                    if (blob && blob.size <= 420 * 1024) break;
+                  }
+                  if (!bestBlob || bestBlob.size >= file.size) return resolve(file);
+                  try { resolve(new File([bestBlob], base + ext, { type: outType })); } catch(_) { resolve(file); }
+                };
+                img.onerror = () => { URL.revokeObjectURL(objUrl); resolve(file); };
+                img.src = objUrl;
+              });
+            }
+            async function previewHeroFile(input) {
+              const rawFile = input.files[0]; if(!rawFile) return;
+              const ready = await compressSettingImg(rawFile);
+              try {
+                const dt = new DataTransfer();
+                dt.items.add(ready);
+                input.files = dt.files;
+              } catch(_) {}
               const reader = new FileReader();
               reader.onload = e => {
                 document.getElementById('heroBgImg').src = e.target.result;
                 const p = document.getElementById('heroBgPreview');
                 p.style.height='120px';
-                document.getElementById('heroFileLabel').textContent = file.name;
+                document.getElementById('heroFileLabel').textContent = ready.name;
                 document.getElementById('heroBgUrl').value = '';
               };
-              reader.readAsDataURL(file);
+              reader.readAsDataURL(ready);
             }
             function previewHeroUrl(url) {
               if(url.length > 10) {
@@ -12979,12 +13418,13 @@ function adminSettingsPage(settings: Record<string, string>): string {
         `).join('')}
         <script>
           async function uploadServiceImg(input, key) {
-            const file = input.files[0]; if(!file) return;
+            const rawFile = input.files[0]; if(!rawFile) return;
             const statusEl = document.getElementById(key+'UploadStatus');
             const labelEl  = document.getElementById(key+'FileLabel');
             statusEl.className = 'mt-1 text-xs font-medium text-blue-600';
-            statusEl.textContent = 'Uploading...';
+            statusEl.textContent = 'Optimizing & uploading...';
             statusEl.classList.remove('hidden');
+            const file = await compressSettingImg(rawFile);
             labelEl.textContent = file.name;
             // Instant preview
             const reader = new FileReader();
@@ -12999,12 +13439,12 @@ function adminSettingsPage(settings: Record<string, string>): string {
             fd.append('image', file);
             fd.append('setting_key', key);
             try {
-              const res  = await fetch('/api/upload-service-image', {method:'POST', body:fd});
+              const res  = await fetch('/api/upload-service-image', {method:'POST', body:fd, credentials:'same-origin'});
               const data = await res.json();
               if(data.success) {
                 statusEl.className = 'mt-1 text-xs font-medium text-green-600';
                 statusEl.textContent = '✓ Saved! Image will appear on homepage immediately.';
-                document.getElementById(key+'Url').value = '';
+                document.getElementById(key+'Url').value = data.url || '';
               } else {
                 statusEl.className = 'mt-1 text-xs font-medium text-red-600';
                 statusEl.textContent = 'Error: ' + (data.error || 'Upload failed');
@@ -13125,8 +13565,50 @@ function adminTechnologyPage(settings: Record<string, string>): string {
           <input type="text" name="technology_hero_image" id="techHeroUrl" value="${(settings.technology_hero_image && !settings.technology_hero_image.startsWith('data:')) ? settings.technology_hero_image : ''}" class="w-full px-3 py-2 border rounded-xl text-xs font-mono focus:outline-none" style="border-color:#e2e8f0;" oninput="previewTechHeroUrl(this.value)" />
         </div>
         <script>
-          function previewTechHeroFile(input) {
-            const file = input.files[0]; if(!file) return;
+          function compressTechHeroImg(file) {
+            return new Promise((resolve) => {
+              if (!file || !file.type || !file.type.startsWith('image/')) return resolve(file);
+              if (file.type === 'image/gif' || file.type === 'image/svg+xml' || file.size < 280 * 1024) return resolve(file);
+              const objUrl = URL.createObjectURL(file);
+              const img = new Image();
+              img.onload = async () => {
+                URL.revokeObjectURL(objUrl);
+                const w = img.naturalWidth || img.width;
+                const h = img.naturalHeight || img.height;
+                if (!w || !h) return resolve(file);
+                const outType = file.type === 'image/png' ? 'image/webp' : 'image/jpeg';
+                const ext = outType === 'image/webp' ? '.webp' : '.jpg';
+                const base = (file.name || 'photo').replace(/\\.[^.]+$/, '');
+                const dims = [1600, 1280, 1024, 800];
+                const quals = [0.82, 0.72, 0.62, 0.50];
+                let bestBlob = null;
+                for (let i = 0; i < dims.length; i++) {
+                  const scale = Math.min(1, dims[i] / Math.max(w, h));
+                  const canvas = document.createElement('canvas');
+                  canvas.width = Math.max(1, Math.round(w * scale));
+                  canvas.height = Math.max(1, Math.round(h * scale));
+                  const ctx = canvas.getContext('2d');
+                  if (!ctx) break;
+                  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                  const blob = await new Promise(r => canvas.toBlob(r, outType, quals[i]));
+                  if (blob && (!bestBlob || blob.size < bestBlob.size)) bestBlob = blob;
+                  if (blob && blob.size <= 420 * 1024) break;
+                }
+                if (!bestBlob || bestBlob.size >= file.size) return resolve(file);
+                try { resolve(new File([bestBlob], base + ext, { type: outType })); } catch(_) { resolve(file); }
+              };
+              img.onerror = () => { URL.revokeObjectURL(objUrl); resolve(file); };
+              img.src = objUrl;
+            });
+          }
+          async function previewTechHeroFile(input) {
+            const rawFile = input.files[0]; if(!rawFile) return;
+            const file = await compressTechHeroImg(rawFile);
+            try {
+              const dt = new DataTransfer();
+              dt.items.add(file);
+              input.files = dt.files;
+            } catch(_) {}
             const reader = new FileReader();
             reader.onload = e => {
               const prev = document.getElementById('techHeroPreview');
@@ -13164,6 +13646,10 @@ function adminTechnologyPage(settings: Record<string, string>): string {
             document.getElementById('techHeroFileInput').value = '';
             document.getElementById('techHeroFileLabel').textContent = 'Click to upload image';
           }
+          window.addEventListener('pageshow', function() {
+            const btn = document.getElementById('techSaveBtn');
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save mr-2"></i>Save Technology Settings'; }
+          });
           // Check if page was just saved
           if(window.location.search.includes('saved=1')) {
             document.getElementById('techSaveAlert').classList.remove('hidden');

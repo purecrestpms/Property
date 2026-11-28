@@ -42,7 +42,7 @@ export const CMS_TABS: CmsTab[] = [
     fields: [
       { key: 'hero_title', label: 'Hero Headline (use Enter for line break)', type: 'textarea', defaultVal: 'Hospitality & Property\nManagement Solutions' },
       { key: 'hero_subtitle', label: 'Hero Subheadline', type: 'textarea', defaultVal: 'Purecrest delivers world-class hotel management, short-let operations, property sales, leasing, and real estate advisory — helping owners maximise returns and guests enjoy exceptional stays.' },
-      { key: 'hero_bg_image', label: 'Hero Background Image', type: 'image', defaultVal: '/static/hero-bg.jpg', help: 'Recommended landscape photo (1600×900+).' },
+      { key: 'hero_bg_image', label: 'Hero Background Image', type: 'image', defaultVal: '/assets/images/hero_purecrest_residence_1795731930518.jpg', help: 'Recommended landscape photo (1600×900+).' },
       { key: 'hero_cta_1_text', label: 'Primary CTA Button Text', type: 'text', defaultVal: 'Contact Us' },
       { key: 'hero_cta_1_url', label: 'Primary CTA Button Link', type: 'text', defaultVal: '/contact' },
       { key: 'hero_cta_2_text', label: 'Secondary CTA Button Text', type: 'text', defaultVal: 'Our Services' },
@@ -99,6 +99,7 @@ export const CMS_TABS: CmsTab[] = [
     fields: [
       { key: 'hosp_hero_title', label: 'Hero Headline', type: 'textarea', defaultVal: 'Your Property.\nOur Management.\nBetter Hospitality.' },
       { key: 'hosp_hero_subtitle', label: 'Hero Description', type: 'textarea', defaultVal: 'We partner with hotel owners and property investors to professionally manage, reposition, and grow their hospitality assets — delivering world-class guest experiences and maximising owner returns.' },
+      { key: 'hospitality_hero_image', label: 'Hero Background Image', type: 'image', defaultVal: '/assets/images/hero_purecrest_residence_1795731930518.jpg', help: 'Full-width background photo behind "Your Property. Our Management. Better Hospitality."' },
       { key: 'hosp_services_heading', label: 'Services Section Heading', type: 'text', defaultVal: 'Comprehensive Hospitality Management' },
       { key: 'hosp_cta_title', label: 'Bottom CTA Heading', type: 'text', defaultVal: 'Let Purecrest Manage Your Shortlet or Hotel — We Deliver Results with Integrity' },
       { key: 'hosp_cta_subtitle', label: 'Bottom CTA Description', type: 'textarea', defaultVal: 'Transparent reporting, professional management, and maximum revenue — all with zero compromise on standards.' },
@@ -398,6 +399,10 @@ export function renderAdminCmsPage(
                   style="background:#0B1F3A;">
                   <i class="fas fa-cloud-upload-alt text-amber-400"></i> Upload New Image
                 </button>
+                <button type="button" onclick="openCmsMediaPicker('${f.key}')"
+                  class="px-3.5 py-2 rounded-lg text-xs font-semibold border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 flex items-center gap-1.5 whitespace-nowrap">
+                  <i class="fas fa-photo-video text-amber-600"></i> Choose from Media Library
+                </button>
                 <span class="text-xs text-slate-400">Auto-optimised &amp; saved immediately</span>
               </div>
               <label for="input_${f.key}" class="block text-xs font-medium text-slate-500">Image URL</label>
@@ -495,33 +500,109 @@ export function renderAdminCmsPage(
     </div>
   </div>
 
+  <!-- Media Library Picker Modal -->
+  <div id="cmsMediaPickerModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4" style="background:rgba(5,28,18,0.68);">
+    <div class="bg-white rounded-2xl w-full max-w-4xl max-h-[86vh] flex flex-col overflow-hidden shadow-2xl border border-slate-200">
+      <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between" style="background:#0B1F3A;">
+        <div>
+          <h3 class="text-sm font-bold text-white flex items-center gap-2"><i class="fas fa-images text-amber-400"></i> Choose from Dashboard Media Library</h3>
+          <p class="text-xs text-slate-300 mt-0.5">Select any seeded or uploaded site image below</p>
+        </div>
+        <button type="button" onclick="closeCmsMediaPicker()" class="w-8 h-8 rounded-full bg-white/15 text-white hover:bg-white/25 flex items-center justify-center"><i class="fas fa-times text-xs"></i></button>
+      </div>
+      <div id="cmsMediaPickerBody" class="p-5 overflow-y-auto grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 bg-slate-50 flex-1"></div>
+    </div>
+  </div>
+
   <script>
-    async function compressCmsImage(file, maxDim, quality) {
-      if (!file.type.startsWith('image/') || file.type === 'image/gif' || file.type === 'image/svg+xml') return file;
+    async function compressCmsImage(file, targetBytes) {
+      targetBytes = targetBytes || (420 * 1024);
+      if (!file || !file.type || !file.type.startsWith('image/') || file.type === 'image/gif' || file.type === 'image/svg+xml') return file;
+      if (file.size <= targetBytes) return file;
       return new Promise((resolve) => {
         const img = new Image();
         const url = URL.createObjectURL(file);
-        img.onload = () => {
+        img.onload = async () => {
           URL.revokeObjectURL(url);
-          let w = img.width, h = img.height;
-          if (w > maxDim || h > maxDim) {
-            if (w >= h) { h = Math.round(h * (maxDim / w)); w = maxDim; }
-            else { w = Math.round(w * (maxDim / h)); h = maxDim; }
+          const origW = img.naturalWidth || img.width;
+          const origH = img.naturalHeight || img.height;
+          if (!origW || !origH) return resolve(file);
+          const dims = [1400, 1100, 860, 680];
+          const quals = [0.84, 0.72, 0.58, 0.45];
+          const outType = file.type === 'image/png' ? 'image/webp' : 'image/jpeg';
+          const ext = outType === 'image/webp' ? '.webp' : '.jpg';
+          let bestFile = file;
+          for (let i = 0; i < dims.length; i++) {
+            const maxD = dims[i];
+            const scale = Math.min(1, maxD / Math.max(origW, origH));
+            const w = Math.max(1, Math.round(origW * scale));
+            const h = Math.max(1, Math.round(origH * scale));
+            const canvas = document.createElement('canvas');
+            canvas.width = w; canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) break;
+            ctx.drawImage(img, 0, 0, w, h);
+            const blob = await new Promise((r) => canvas.toBlob(r, outType, quals[i]));
+            if (blob) {
+              const candidate = new File([blob], (file.name || 'image').replace(/\\.[^.]+$/, '') + ext, { type: outType });
+              if (candidate.size < bestFile.size) bestFile = candidate;
+              if (candidate.size <= targetBytes) { resolve(candidate); return; }
+            }
           }
-          const canvas = document.createElement('canvas');
-          canvas.width = w; canvas.height = h;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0, w, h);
-          const outType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
-          canvas.toBlob((blob) => {
-            if (!blob || blob.size > file.size) { resolve(file); return; }
-            resolve(new File([blob], file.name.replace(/\\.[^.]+$/, outType === 'image/png' ? '.png' : '.jpg'), { type: outType }));
-          }, outType, quality);
+          resolve(bestFile);
         };
         img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
         img.src = url;
       });
     }
+
+    let _cmsPickerKey = null;
+    window.openCmsMediaPicker = async function(key) {
+      _cmsPickerKey = key;
+      const modal = document.getElementById('cmsMediaPickerModal');
+      const body = document.getElementById('cmsMediaPickerBody');
+      if (!modal || !body) return;
+      modal.classList.remove('hidden');
+      body.innerHTML = '<div class="col-span-full py-12 text-center text-sm text-slate-500"><i class="fas fa-spinner fa-spin mr-2"></i>Loading media library…</div>';
+      try {
+        const res = await fetch('/api/media?type=image', { credentials: 'same-origin' });
+        const data = await res.json();
+        const items = (data && data.items) || [];
+        if (!items.length) {
+          body.innerHTML = '<div class="col-span-full py-12 text-center text-sm text-slate-400">No images found in Media Library yet.</div>';
+          return;
+        }
+        body.innerHTML = '';
+        items.forEach((m) => {
+          const src = m.display_url || (m.file_url && (m.file_url.startsWith('/') || m.file_url.startsWith('http')) ? m.file_url : ('/api/media/' + m.id));
+          const card = document.createElement('button');
+          card.type = 'button';
+          card.className = 'group text-left bg-white rounded-xl border border-slate-200 overflow-hidden hover:border-amber-500 hover:shadow-md transition-all focus:outline-none';
+          card.onclick = () => pickCmsMedia(src);
+          card.innerHTML = '<div class="relative aspect-[4/3] bg-slate-100 overflow-hidden"><img src="' + escAttr(src) + '" class="w-full h-full object-cover" loading="lazy" /></div><div class="p-2"><p class="text-[11px] font-semibold text-slate-700 truncate"></p></div>';
+          card.querySelector('p').textContent = m.file_name || ('media-' + m.id);
+          body.appendChild(card);
+        });
+      } catch (_) {
+        body.innerHTML = '<div class="col-span-full py-12 text-center text-sm text-red-600">Failed to load Media Library.</div>';
+      }
+    };
+    function escAttr(s) { return String(s || '').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+    window.closeCmsMediaPicker = function() {
+      const modal = document.getElementById('cmsMediaPickerModal');
+      if (modal) modal.classList.add('hidden');
+      _cmsPickerKey = null;
+    };
+    window.pickCmsMedia = function(url) {
+      if (!_cmsPickerKey) return;
+      const inputEl = document.getElementById('input_' + _cmsPickerKey);
+      const prevEl = document.getElementById('prev_' + _cmsPickerKey);
+      const statusEl = document.getElementById('status_' + _cmsPickerKey);
+      if (inputEl) inputEl.value = url;
+      if (prevEl) { prevEl.style.opacity = '1'; prevEl.src = url; }
+      if (statusEl) { statusEl.className = 'text-xs font-semibold text-amber-700'; statusEl.textContent = 'Selected from library — click Save & Publish'; }
+      window.closeCmsMediaPicker();
+    };
 
     window.cmsUploadImage = async function(input, key) {
       const file = input.files && input.files[0];
@@ -531,11 +612,11 @@ export function renderAdminCmsPage(
       const inputEl = document.getElementById('input_' + key);
       if (statusEl) { statusEl.className = 'text-xs font-semibold text-blue-600'; statusEl.textContent = 'Optimising & uploading...'; }
       try {
-        const optimized = await compressCmsImage(file, 1600, 0.84);
+        const optimized = await compressCmsImage(file, 420 * 1024);
         const fd = new FormData();
         fd.append('image', optimized);
         fd.append('setting_key', key);
-        const res = await fetch('/api/upload-service-image', { method: 'POST', body: fd });
+        const res = await fetch('/api/upload-service-image', { method: 'POST', body: fd, credentials: 'same-origin' });
         const data = await res.json();
         if (data.success && data.url) {
           if (inputEl) inputEl.value = data.url;
